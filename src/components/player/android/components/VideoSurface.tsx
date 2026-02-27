@@ -115,13 +115,16 @@ const exoMimeToCodec = (mimeType?: string): string | null => {
 
 export const buildExoAudioTrackName = (t: any, i: number): string => {
     const parts: string[] = [];
-    let rawTitle: string = t.title ?? '';
+
+    // Check both title and name fields for the |ch: encoding from Java
+    let rawTitle: string = t.title ?? t.name ?? '';
     let channelCount: number | null = null;
     const chMatch = rawTitle.match(/\|ch:(\d+)$/);
     if (chMatch) {
         channelCount = parseInt(chMatch[1], 10);
         rawTitle = rawTitle.replace(/\|ch:\d+$/, '').trim();
     }
+
     if (rawTitle) {
         // Prepend language if available and not already in the title
         if (t.language) {
@@ -134,9 +137,22 @@ export const buildExoAudioTrackName = (t: any, i: number): string => {
     } else if (t.language) {
         parts.push(EXOPLAYER_LANG_MAP[t.language.toLowerCase()] ?? t.language.toUpperCase());
     }
+
     const codec = exoMimeToCodec(t.mimeType);
     if (codec) parts.push(codec);
-    const ch = channelCount ?? t.channelCount ?? null;
+
+    // Use parsed channel count, fall back to bitrate-based guess for AC3/EAC3
+    let ch = channelCount ?? t.channelCount ?? null;
+    if (ch == null && t.bitrate != null && t.bitrate > 0) {
+        const mime = (t.mimeType ?? '').toLowerCase();
+        if (mime.includes('ac3') || mime.includes('eac3') || mime.includes('ec-3')) {
+            // AC3: 640kbps = 5.1, 192-256kbps = 2.0
+            // EAC3: 768kbps+ = 5.1, 192-256kbps = 2.0
+            if (t.bitrate >= 500000) ch = 6;
+            else if (t.bitrate <= 320000) ch = 2;
+        }
+    }
+
     if (ch != null && ch > 0) {
         if (ch === 8) parts.push('7.1');
         else if (ch === 7) parts.push('6.1');
@@ -145,9 +161,11 @@ export const buildExoAudioTrackName = (t: any, i: number): string => {
         else if (ch === 1) parts.push('Mono');
         else parts.push(`${ch}ch`);
     }
+
     if (t.bitrate != null && t.bitrate > 0) {
         parts.push(`${Math.round(t.bitrate / 1000)} kbps`);
     }
+
     return parts.length > 0 ? parts.join(' ') : `Track ${i + 1}`;
 };
 
