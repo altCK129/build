@@ -119,10 +119,17 @@ export const buildExoAudioTrackName = (t: any, i: number): string => {
     // Check both title and name fields for the |ch: encoding from Java
     let rawTitle: string = t.title ?? t.name ?? '';
     let channelCount: number | null = null;
-    const chMatch = rawTitle.match(/\|ch:(\d+)$/);
+    let encodedBitrate: number | null = null;
+
+    const chMatch = rawTitle.match(/\|ch:(\d+)/);
     if (chMatch) {
         channelCount = parseInt(chMatch[1], 10);
-        rawTitle = rawTitle.replace(/\|ch:\d+$/, '').trim();
+        rawTitle = rawTitle.replace(/\|ch:\d+/, '').trim();
+    }
+    const brMatch = rawTitle.match(/\|br:(\d+)/);
+    if (brMatch) {
+        encodedBitrate = parseInt(brMatch[1], 10);
+        rawTitle = rawTitle.replace(/\|br:\d+/, '').trim();
     }
 
     if (rawTitle) {
@@ -162,8 +169,10 @@ export const buildExoAudioTrackName = (t: any, i: number): string => {
         else parts.push(`${ch}ch`);
     }
 
-    if (t.bitrate != null && t.bitrate > 0) {
-        parts.push(`${Math.round(t.bitrate / 1000)} kbps`);
+    // Use encoded bitrate first, fall back to t.bitrate / t.bitRate field
+    const bitrate = encodedBitrate ?? t.bitrate ?? t.bitRate ?? null;
+    if (bitrate != null && bitrate > 0) {
+        parts.push(`${Math.round(bitrate / 1000)} kbps`);
     }
 
     return parts.length > 0 ? parts.join(' ') : `Track ${i + 1}`;
