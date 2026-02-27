@@ -78,6 +78,141 @@ const isCodecError = (errorString: string): boolean => {
     });
 };
 
+const EXOPLAYER_LANG_MAP: Record<string, string> = {
+    en: 'English', eng: 'English',
+    es: 'Spanish', spa: 'Spanish',
+    fr: 'French', fre: 'French',
+    de: 'German', ger: 'German',
+    it: 'Italian', ita: 'Italian',
+    ja: 'Japanese', jpn: 'Japanese',
+    ko: 'Korean', kor: 'Korean',
+    zh: 'Chinese', chi: 'Chinese',
+    ru: 'Russian', rus: 'Russian',
+    pt: 'Portuguese', por: 'Portuguese',
+    hi: 'Hindi', hin: 'Hindi',
+    ar: 'Arabic', ara: 'Arabic',
+    nl: 'Dutch', dut: 'Dutch',
+    pl: 'Polish', pol: 'Polish',
+    tr: 'Turkish', tur: 'Turkish',
+};
+
+const exoMimeToCodec = (mimeType?: string): string | null => {
+    if (!mimeType) return null;
+    const mime = mimeType.toLowerCase();
+    if (mime.includes('eac3') || mime.includes('ec-3')) return 'Dolby Digital Plus';
+    if (mime.includes('ac3') || mime.includes('ac-3')) return 'Dolby Digital';
+    if (mime.includes('truehd')) return 'TrueHD';
+    if (mime.includes('dts.hd') || mime.includes('dts-hd') || mime.includes('dtshd')) return 'DTS-HD';
+    if (mime.includes('dts.uhd') || mime.includes('dts:x')) return 'DTS:X';
+    if (mime.includes('dts')) return 'DTS';
+    if (mime.includes('aac')) return 'AAC';
+    if (mime.includes('opus')) return 'Opus';
+    if (mime.includes('vorbis')) return 'Vorbis';
+    if (mime.includes('mp4a') || mime.includes('mpeg')) return 'MP3';
+    if (mime.includes('flac')) return 'FLAC';
+    return null;
+};
+
+export const buildExoAudioTrackName = (t: any, i: number): string => {
+    const parts: string[] = [];
+
+    // Check both title and name fields for encoded metadata from Java
+    let rawTitle: string = t.title ?? t.name ?? '';
+    let channelCount: number | null = null;
+    let encodedBitrate: number | null = null;
+    let encodedMimeType: string | null = null;
+
+    // Extract |ch:N, |br:N, |mt:mime from title
+    const chMatch = rawTitle.match(/\|ch:(\d+)/);
+    if (chMatch) channelCount = parseInt(chMatch[1], 10);
+
+    const brMatch = rawTitle.match(/\|br:(\d+)/);
+    if (brMatch) encodedBitrate = parseInt(brMatch[1], 10);
+
+    const mtMatch = rawTitle.match(/\|mt:([^|]+)/);
+    if (mtMatch) encodedMimeType = mtMatch[1];
+
+    // Strip all encoded metadata from the display title
+    rawTitle = rawTitle.replace(/\|ch:\d+/g, '').replace(/\|br:\d+/g, '').replace(/\|mt:[^|]+/g, '').trim();
+
+    if (rawTitle) {
+        if (t.language) {
+            const lang = EXOPLAYER_LANG_MAP[t.language.toLowerCase()] ?? t.language.toUpperCase();
+            if (!rawTitle.toLowerCase().includes(lang.toLowerCase())) {
+                parts.push(lang);
+            }
+        }
+        parts.push(rawTitle);
+    } else if (t.language) {
+        parts.push(EXOPLAYER_LANG_MAP[t.language.toLowerCase()] ?? t.language.toUpperCase());
+    }
+
+    // Use mimeType from track object, fall back to encoded mimeType from title
+    const mimeType = t.mimeType ?? encodedMimeType ?? null;
+    const codec = exoMimeToCodec(mimeType);
+    // Only append codec if title doesn't already mention it
+    const titleLowerForCodec = rawTitle.toLowerCase();
+    const codecAlreadyInTitle = titleLowerForCodec.includes('dolby') ||
+        titleLowerForCodec.includes('dts') ||
+        titleLowerForCodec.includes('atmos') ||
+        titleLowerForCodec.includes('aac') ||
+        titleLowerForCodec.includes('truehd') ||
+        titleLowerForCodec.includes('flac');
+    if (codec && !codecAlreadyInTitle) parts.push(codec);
+
+    // Use parsed channel count, fall back to bitrate-based guess for AC3/EAC3
+    let ch = channelCount ?? t.channelCount ?? null;
+    if (ch == null) {
+        const mime = (mimeType ?? '').toLowerCase();
+        const br = encodedBitrate ?? t.bitrate ?? 0;
+        if (mime.includes('ac3') || mime.includes('eac3') || mime.includes('ec-3')) {
+            if (br >= 500000) ch = 6;
+            else if (br > 0 && br <= 320000) ch = 2;
+        }
+    }
+
+    if (ch != null && ch > 0) {
+        if (ch === 8) parts.push('7.1');
+        else if (ch === 7) parts.push('6.1');
+        else if (ch === 6) parts.push('5.1');
+        else if (ch === 2) parts.push('2.0');
+        else if (ch === 1) parts.push('Mono');
+        else parts.push(`${ch}ch`);
+    }
+
+    const bitrate = encodedBitrate ?? t.bitrate ?? t.bitRate ?? null;
+    if (bitrate != null && bitrate > 0) {
+        parts.push(`${Math.round(bitrate / 1000)} kbps`);
+    }
+
+    return parts.length > 0 ? parts.join(' ') : `Track ${i + 1}`;
+};
+
+
+export const buildExoSubtitleTrackName = (t: any, i: number): string => {
+    const parts: string[] = [];
+    const titleLower = (t.title ?? '').toLowerCase();
+    if (t.title && t.title.trim()) {
+        // Prepend language if available and not already in the title
+        if (t.language) {
+            const lang = EXOPLAYER_LANG_MAP[t.language.toLowerCase()] ?? t.language.toUpperCase();
+            if (!t.title.toLowerCase().includes(lang.toLowerCase())) {
+                parts.push(lang);
+            }
+        }
+        parts.push(t.title.trim());
+    } else if (t.language) {
+        parts.push(EXOPLAYER_LANG_MAP[t.language.toLowerCase()] ?? t.language.toUpperCase());
+    }
+    if (t.isHearingImpaired || titleLower.includes('sdh') || titleLower.includes('hearing impaired') || titleLower.includes('cc')) {
+        if (!titleLower.includes('sdh')) parts.push('SDH');
+    }
+    if (t.isForced || titleLower.includes('forced')) {
+        if (!titleLower.includes('forced')) parts.push('Forced');
+    }
+    return parts.length > 0 ? parts.join(' ') : `Track ${i + 1}`;
+};
+
 export const VideoSurface: React.FC<VideoSurfaceProps> = ({
     processedStreamUrl,
     videoType,
@@ -224,13 +359,13 @@ export const VideoSurface: React.FC<VideoSurfaceProps> = ({
     const handleExoLoad = (data: any) => {
         const audioTracks = data.audioTracks?.map((t: any, i: number) => ({
             id: i,
-            name: t.title || t.language || `Track ${i + 1}`,
+            name: buildExoAudioTrackName(t, i),
             language: t.language,
         })) ?? [];
 
         const subtitleTracks = data.textTracks?.map((t: any, i: number) => ({
             id: i,
-            name: t.title || t.language || `Track ${i + 1}`,
+            name: buildExoSubtitleTrackName(t, i),
             language: t.language,
         })) ?? [];
 
