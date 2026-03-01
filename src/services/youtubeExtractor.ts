@@ -21,6 +21,8 @@ interface InnertubeFormat {
   approxDurationMs?: string;
   lastModified?: string;
   projectionType?: string;
+  initRange?: { start: string; end: string };
+  indexRange?: { start: string; end: string };
 }
 
 interface InnertubeStreamingData {
@@ -264,7 +266,6 @@ async function writeDashManifestToFile(
   durationSeconds?: number
 ): Promise<string | null> {
   try {
-    // Use the same import path as the rest of the project
     const FileSystem = await import('expo-file-system/legacy');
     const cacheDir = FileSystem.cacheDirectory;
     if (!cacheDir) return null;
@@ -283,12 +284,27 @@ async function writeDashManifestToFile(
     const audioBandwidth = audioFormat.bitrate ?? 128_000;
     const audioSampleRate = audioFormat.audioSampleRate ?? '44100';
 
-    // XML-escape a URL — YouTube signed URLs contain & which breaks XML attribute values
     const escapeXml = (s: string) =>
       s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
     const videoUrl = escapeXml(videoFormat.url!);
     const audioUrl = escapeXml(audioFormat.url!);
+
+    // Use proper initRange/indexRange if available (YouTube adaptive streams have these)
+    // Without correct ranges ExoPlayer's DashMediaSource cannot parse the segment index.
+    // Fall back to range "0-0" only as last resort — ExoPlayer will attempt a range request.
+    const vInit = videoFormat.initRange
+      ? `${videoFormat.initRange.start}-${videoFormat.initRange.end}`
+      : '0-0';
+    const vIndex = videoFormat.indexRange
+      ? `${videoFormat.indexRange.start}-${videoFormat.indexRange.end}`
+      : '0-0';
+    const aInit = audioFormat.initRange
+      ? `${audioFormat.initRange.start}-${audioFormat.initRange.end}`
+      : '0-0';
+    const aIndex = audioFormat.indexRange
+      ? `${audioFormat.indexRange.start}-${audioFormat.indexRange.end}`
+      : '0-0';
 
     const mpd = `<?xml version="1.0" encoding="UTF-8"?>
 <MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="${mediaDurationISO}" minBufferTime="PT2S" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011">
@@ -296,26 +312,28 @@ async function writeDashManifestToFile(
     <AdaptationSet id="1" mimeType="${videoMime}" codecs="${videoCodec}" width="${width}" height="${height}" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
       <Representation id="v1" bandwidth="${videoBandwidth}" width="${width}" height="${height}">
         <BaseURL>${videoUrl}</BaseURL>
-        <SegmentBase><Initialization range="0-0"/></SegmentBase>
+        <SegmentBase indexRange="${vIndex}">
+          <Initialization range="${vInit}"/>
+        </SegmentBase>
       </Representation>
     </AdaptationSet>
     <AdaptationSet id="2" mimeType="${audioMime}" codecs="${audioCodec}" lang="en" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
       <Representation id="a1" bandwidth="${audioBandwidth}" audioSamplingRate="${audioSampleRate}">
         <BaseURL>${audioUrl}</BaseURL>
-        <SegmentBase><Initialization range="0-0"/></SegmentBase>
+        <SegmentBase indexRange="${aIndex}">
+          <Initialization range="${aInit}"/>
+        </SegmentBase>
       </Representation>
     </AdaptationSet>
   </Period>
 </MPD>`;
 
-    // Use videoId in the filename so the cache is naturally keyed per video
     const filePath = `${cacheDir}trailer_${videoId}.mpd`;
     await FileSystem.writeAsStringAsync(filePath, mpd, { encoding: FileSystem.EncodingType.UTF8 });
-
-    logger.info('YouTubeExtractor', `DASH manifest written to: ${filePath}`);
-    return filePath; // This is already a valid file:// path for expo-file-system
+    logger.info('YouTubeExtractor', `DASH manifest written: ${filePath}`);
+    return filePath;
   } catch (err) {
-    logger.warn('YouTubeExtractor', 'Failed to write DASH manifest file:', err);
+    logger.warn('YouTubeExtractor', 'writeDashManifestToFile failed:', err);
     return null;
   }
 }
@@ -396,21 +414,50 @@ function parseAdaptiveFormats(playerResponse: InnertubePlayerResponse): Innertub
   return (sd.adaptiveFormats ?? []).filter((f) => !!f.url);
 }
 
-function pickBestMuxedStream(formats: InnertubeFormat[]): ExtractedStream | null {
-  if (formats.length === 0) return null;
-  const mp4Formats = formats.filter(isVideoMp4);
-  const pool = mp4Formats.length > 0 ? mp4Formats : formats;
-  const sorted = [...pool].sort((a, b) => scoreFormat(b) - scoreFormat(a));
-  const best = sorted[0];
-  return {
-    url: best.url!,
-    quality: formatQualityLabel(best),
-    mimeType: best.mimeType,
-    itag: best.itag,
-    hasAudio: !!best.audioQuality || isMuxedFormat(best),
-    hasVideo: !!best.qualityLabel || best.mimeType.startsWith('video/'),
-    bitrate: best.bitrate ?? 0,
-  };
+function pickBestMuxedStream(
+  muxedFormats: InnertubeFormat[],
+  adaptiveFormats: InnertubeFormat[] = []
+): ExtractedStream | null {
+  // Prefer proper muxed streams (have both video and audio)
+  if (muxedFormats.length > 0) {
+    const mp4Formats = muxedFormats.filter(isVideoMp4);
+    const pool = mp4Formats.length > 0 ? mp4Formats : muxedFormats;
+    const sorted = [...pool].sort((a, b) => scoreFormat(b) - scoreFormat(a));
+    const best = sorted[0];
+    return {
+      url: best.url!,
+      quality: formatQualityLabel(best),
+      mimeType: best.mimeType,
+      itag: best.itag,
+      hasAudio: !!best.audioQuality || isMuxedFormat(best),
+      hasVideo: !!best.qualityLabel || best.mimeType.startsWith('video/'),
+      bitrate: best.bitrate ?? 0,
+    };
+  }
+
+  // Last resort: if there are no muxed formats at all, use the best video-only
+  // adaptive stream (will have no audio, but at least something plays vs nothing)
+  if (adaptiveFormats.length > 0) {
+    const videoAdaptive = adaptiveFormats.filter(
+      (f) => f.url && f.qualityLabel && f.mimeType.startsWith('video/')
+    );
+    if (videoAdaptive.length > 0) {
+      const sorted = [...videoAdaptive].sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0));
+      const best = sorted[0];
+      logger.warn('YouTubeExtractor', `No muxed streams — using video-only adaptive itag=${best.itag} (no audio)`);
+      return {
+        url: best.url!,
+        quality: formatQualityLabel(best),
+        mimeType: best.mimeType,
+        itag: best.itag,
+        hasAudio: false,
+        hasVideo: true,
+        bitrate: best.bitrate ?? 0,
+      };
+    }
+  }
+
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -528,9 +575,9 @@ export class YouTubeExtractor {
       }
     }
 
-    // iOS or DASH fallback: use best muxed stream
+    // iOS or DASH fallback: use best muxed stream (or video-only adaptive as last resort)
     if (!bestStream) {
-      bestStream = pickBestMuxedStream(muxedFormats);
+      bestStream = pickBestMuxedStream(muxedFormats, adaptiveFormats);
       if (bestStream) {
         logger.info('YouTubeExtractor', `Muxed: itag=${bestStream.itag} quality=${bestStream.quality}`);
       }
