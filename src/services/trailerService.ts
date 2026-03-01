@@ -151,6 +151,12 @@ export class TrailerService {
       this.urlCache.delete(key);
       return null;
     }
+    // Don't return cached .mpd file paths — the temp file may no longer exist
+    // after an app restart, and we'd rather re-extract than serve a dead file URI
+    if (entry.url.endsWith('.mpd')) {
+      this.urlCache.delete(key);
+      return null;
+    }
     return entry.url;
   }
 

@@ -264,8 +264,8 @@ async function writeDashManifestToFile(
   durationSeconds?: number
 ): Promise<string | null> {
   try {
-    // Lazy import to keep this module usable in non-RN environments (e.g. tests)
-    const FileSystem = await import('expo-file-system');
+    // Use the same import path as the rest of the project
+    const FileSystem = await import('expo-file-system/legacy');
     const cacheDir = FileSystem.cacheDirectory;
     if (!cacheDir) return null;
 
