@@ -13,6 +13,7 @@ import {
 } from 'react-native';
 import { NavigationProp, useNavigation, useIsFocused } from '@react-navigation/native';
 import { useTranslation } from 'react-i18next';
+import { TMDBService } from '../../services/tmdbService';
 import { RootStackParamList } from '../../navigation/AppNavigator';
 import { LinearGradient } from 'expo-linear-gradient';
 import FastImage from '@d11/react-native-fast-image';
@@ -457,8 +458,9 @@ const AppleTVHero: React.FC<AppleTVHeroProps> = ({
         logger.info('[AppleTVHero] Fetching TMDB videos for:', currentItem.name, 'tmdbId:', tmdbId);
 
         // Fetch video list from TMDB to get the YouTube video ID
+        const tmdbApiKey = await TMDBService.getInstance().getApiKey();
         const videosRes = await fetch(
-          `https://api.themoviedb.org/3/${contentType}/${tmdbId}/videos?api_key=d131017ccc6e5462a81c9304d21476de&language=en-US`
+          `https://api.themoviedb.org/3/${contentType}/${tmdbId}/videos?api_key=${tmdbApiKey}&language=en-US`
         );
 
         if (!alive) return;

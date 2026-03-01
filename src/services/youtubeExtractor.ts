@@ -109,6 +109,19 @@ const TVHTML5_EMBEDDED_CONTEXT = {
   },
 };
 
+// Web Embedded client — good fallback for content that rejects app clients
+const WEB_EMBEDDED_CONTEXT = {
+  client: {
+    clientName: 'WEB_EMBEDDED_PLAYER',
+    clientVersion: '2.20240726.00.00',
+    hl: 'en',
+    gl: 'US',
+  },
+  thirdParty: {
+    embedUrl: 'https://www.youtube.com',
+  },
+};
+
 // ---------------------------------------------------------------------------
 // Itag reference tables
 // ---------------------------------------------------------------------------
@@ -501,6 +514,11 @@ export class YouTubeExtractor {
         name: 'TVHTML5_EMBEDDED',
         context: TVHTML5_EMBEDDED_CONTEXT,
         userAgent: 'Mozilla/5.0 (SMART-TV; Linux; Tizen 6.0)',
+      },
+      {
+        name: 'WEB_EMBEDDED',
+        context: WEB_EMBEDDED_CONTEXT,
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
       },
     ];
 
