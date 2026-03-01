@@ -111,16 +111,17 @@ const TVHTML5_EMBEDDED_CONTEXT = {
 // Itag reference tables
 // ---------------------------------------------------------------------------
 
-// Muxed (video+audio in one file) — these are the ONLY formats iOS AVPlayer
-// can play without a DASH bridge. Max quality is 720p (itag 22), often absent.
+// Muxed (video+audio in one file).
+// iOS AVPlayer can ONLY use these. Max quality YouTube provides is 720p (itag 22),
+// but it is often absent on modern videos, leaving 360p (itag 18) as the fallback.
 const PREFERRED_MUXED_ITAGS = [
   22,   // 720p MP4 (video+audio)
   59,   // 480p MP4 (video+audio) — rare
   78,   // 480p MP4 (video+audio) — rare
 ];
 
-// Adaptive video-only itags in descending quality order.
-// ExoPlayer on Android can combine these with an audio stream via DASH.
+// Adaptive video-only itags, best quality first (MP4 preferred over WebM).
+// Used for DASH on Android only.
 const ADAPTIVE_VIDEO_ITAGS_RANKED = [
   137,  // 1080p MP4 video-only
   248,  // 1080p WebM video-only
@@ -132,7 +133,8 @@ const ADAPTIVE_VIDEO_ITAGS_RANKED = [
   243,  // 360p WebM video-only
 ];
 
-// Adaptive audio-only itags in descending quality order.
+// Adaptive audio-only itags, best quality first (AAC preferred over Opus).
+// Used for DASH on Android only.
 const ADAPTIVE_AUDIO_ITAGS_RANKED = [
   141,  // 256kbps AAC
   140,  // 128kbps AAC  ← most common
@@ -214,16 +216,15 @@ function scoreFormat(format: InnertubeFormat): number {
 }
 
 // ---------------------------------------------------------------------------
-// Adaptive stream selection helpers
+// Adaptive stream helpers (Android/DASH only)
 // ---------------------------------------------------------------------------
 
-/** Pick the best video-only adaptive format available (MP4 preferred). */
 function pickBestAdaptiveVideo(adaptiveFormats: InnertubeFormat[]): InnertubeFormat | null {
+  // Video-only: has qualityLabel, no audioQuality, has direct URL
   const videoOnly = adaptiveFormats.filter(
     (f) => f.url && f.qualityLabel && !f.audioQuality && f.mimeType.startsWith('video/')
   );
   if (videoOnly.length === 0) return null;
-
   for (const itag of ADAPTIVE_VIDEO_ITAGS_RANKED) {
     const match = videoOnly.find((f) => f.itag === itag);
     if (match) return match;
@@ -231,13 +232,12 @@ function pickBestAdaptiveVideo(adaptiveFormats: InnertubeFormat[]): InnertubeFor
   return videoOnly.sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0))[0] ?? null;
 }
 
-/** Pick the best audio-only adaptive format available (AAC preferred). */
 function pickBestAdaptiveAudio(adaptiveFormats: InnertubeFormat[]): InnertubeFormat | null {
+  // Audio-only: has audioQuality, no qualityLabel, has direct URL
   const audioOnly = adaptiveFormats.filter(
     (f) => f.url && f.audioQuality && !f.qualityLabel && f.mimeType.startsWith('audio/')
   );
   if (audioOnly.length === 0) return null;
-
   for (const itag of ADAPTIVE_AUDIO_ITAGS_RANKED) {
     const match = audioOnly.find((f) => f.itag === itag);
     if (match) return match;
@@ -246,16 +246,29 @@ function pickBestAdaptiveAudio(adaptiveFormats: InnertubeFormat[]): InnertubeFor
 }
 
 /**
- * Build an in-memory DASH MPD XML that references separate video + audio streams.
- * ExoPlayer (Android) can parse a data:application/dash+xml;base64,... URI directly.
- * iOS AVPlayer does NOT support DASH — this path is Android-only.
+ * Write a DASH MPD manifest to a temp file and return its file:// URI.
+ *
+ * We use a file URI rather than a data: URI because:
+ * - ExoPlayer's DefaultDataSource handles file:// URIs natively via FileDataSource.
+ * - The .mpd file extension lets ExoPlayer auto-detect the type even without an
+ *   explicit 'type' hint — meaning TrailerModal's bare <Video> also works correctly.
+ * - Avoids the need for a Buffer/btoa polyfill (not guaranteed in Hermes).
+ *
+ * Uses expo-file-system which is already in the project's dependencies.
+ * Returns null if writing fails.
  */
-function buildDashManifest(
+async function writeDashManifestToFile(
   videoFormat: InnertubeFormat,
   audioFormat: InnertubeFormat,
+  videoId: string,
   durationSeconds?: number
-): string | null {
+): Promise<string | null> {
   try {
+    // Lazy import to keep this module usable in non-RN environments (e.g. tests)
+    const FileSystem = await import('expo-file-system');
+    const cacheDir = FileSystem.cacheDirectory;
+    if (!cacheDir) return null;
+
     const duration = durationSeconds ?? 300;
     const mediaDurationISO = `PT${duration}S`;
 
@@ -270,6 +283,7 @@ function buildDashManifest(
     const audioBandwidth = audioFormat.bitrate ?? 128_000;
     const audioSampleRate = audioFormat.audioSampleRate ?? '44100';
 
+    // XML-escape a URL — YouTube signed URLs contain & which breaks XML attribute values
     const escapeXml = (s: string) =>
       s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -294,10 +308,14 @@ function buildDashManifest(
   </Period>
 </MPD>`;
 
-    const b64 = Buffer.from(mpd, 'utf8').toString('base64');
-    return `data:application/dash+xml;base64,${b64}`;
+    // Use videoId in the filename so the cache is naturally keyed per video
+    const filePath = `${cacheDir}trailer_${videoId}.mpd`;
+    await FileSystem.writeAsStringAsync(filePath, mpd, { encoding: FileSystem.EncodingType.UTF8 });
+
+    logger.info('YouTubeExtractor', `DASH manifest written to: ${filePath}`);
+    return filePath; // This is already a valid file:// path for expo-file-system
   } catch (err) {
-    logger.warn('YouTubeExtractor', 'Failed to build DASH manifest:', err);
+    logger.warn('YouTubeExtractor', 'Failed to write DASH manifest file:', err);
     return null;
   }
 }
@@ -358,29 +376,20 @@ async function fetchPlayerResponse(
   }
 }
 
-/**
- * Returns muxed formats (video+audio) from sd.formats, plus any muxed adaptive formats.
- * Used as the iOS fallback and the basis for the muxed bestStream.
- */
 function parseMuxedFormats(playerResponse: InnertubePlayerResponse): InnertubeFormat[] {
   const sd = playerResponse.streamingData;
   if (!sd) return [];
-
   const formats: InnertubeFormat[] = [];
   for (const f of sd.formats ?? []) {
     if (f.url) formats.push(f);
   }
-  // Edge case: some adaptive formats are actually muxed
+  // Edge case: some adaptive formats are muxed
   for (const f of sd.adaptiveFormats ?? []) {
     if (f.url && isMuxedFormat(f)) formats.push(f);
   }
   return formats;
 }
 
-/**
- * Returns all adaptive formats (video-only + audio-only) that have direct URLs.
- * Used for DASH manifest building on Android.
- */
 function parseAdaptiveFormats(playerResponse: InnertubePlayerResponse): InnertubeFormat[] {
   const sd = playerResponse.streamingData;
   if (!sd) return [];
@@ -389,12 +398,10 @@ function parseAdaptiveFormats(playerResponse: InnertubePlayerResponse): Innertub
 
 function pickBestMuxedStream(formats: InnertubeFormat[]): ExtractedStream | null {
   if (formats.length === 0) return null;
-
   const mp4Formats = formats.filter(isVideoMp4);
   const pool = mp4Formats.length > 0 ? mp4Formats : formats;
   const sorted = [...pool].sort((a, b) => scoreFormat(b) - scoreFormat(a));
   const best = sorted[0];
-
   return {
     url: best.url!,
     quality: formatQualityLabel(best),
@@ -414,21 +421,23 @@ export class YouTubeExtractor {
   /**
    * Extract a playable stream URL from a YouTube video ID or URL.
    *
-   * Strategy:
-   *  - Android: Try to build a DASH manifest from the best adaptive video +
-   *    audio streams (up to 1080p). Falls back to best muxed stream (≤720p).
-   *  - iOS: Use best muxed stream only (AVPlayer has no DASH support).
+   * On Android: attempts to build a DASH manifest from high-quality adaptive
+   * streams (up to 1080p) written to a temp .mpd file. Falls back to best
+   * muxed stream (max 720p) if adaptive streams are unavailable or file write fails.
    *
-   * Tries Android Innertube client first, then iOS, then TV Embedded.
+   * On iOS: always returns the best muxed stream. AVPlayer has no DASH support.
    */
-  static async extract(videoIdOrUrl: string, platform?: 'android' | 'ios'): Promise<YouTubeExtractionResult | null> {
+  static async extract(
+    videoIdOrUrl: string,
+    platform?: 'android' | 'ios'
+  ): Promise<YouTubeExtractionResult | null> {
     const videoId = extractVideoId(videoIdOrUrl);
     if (!videoId) {
       logger.warn('YouTubeExtractor', `Could not parse video ID from: ${videoIdOrUrl}`);
       return null;
     }
 
-    logger.info('YouTubeExtractor', `Extracting streams for videoId=${videoId} platform=${platform ?? 'unknown'}`);
+    logger.info('YouTubeExtractor', `Extracting for videoId=${videoId} platform=${platform ?? 'unknown'}`);
 
     const clients: Array<{ context: object; userAgent: string; name: string }> = [
       {
@@ -455,7 +464,6 @@ export class YouTubeExtractor {
     for (const client of clients) {
       logger.info('YouTubeExtractor', `Trying ${client.name} client...`);
       const resp = await fetchPlayerResponse(videoId, client.context, client.userAgent);
-
       if (!resp) continue;
 
       const status = resp.playabilityStatus?.status;
@@ -468,7 +476,7 @@ export class YouTubeExtractor {
       const adaptive = parseAdaptiveFormats(resp);
 
       if (muxed.length > 0 || adaptive.length > 0) {
-        logger.info('YouTubeExtractor', `${client.name}: ${muxed.length} muxed, ${adaptive.length} adaptive formats`);
+        logger.info('YouTubeExtractor', `${client.name}: ${muxed.length} muxed, ${adaptive.length} adaptive`);
         muxedFormats = muxed;
         adaptiveFormats = adaptive;
         playerResponse = resp;
@@ -486,22 +494,22 @@ export class YouTubeExtractor {
     const details = playerResponse?.videoDetails;
     const durationSeconds = details?.lengthSeconds ? parseInt(details.lengthSeconds, 10) : undefined;
 
-    // --- Android: attempt high-quality DASH manifest ---
     let bestStream: ExtractedStream | null = null;
 
+    // Android: try DASH via temp .mpd file (works in TrailerPlayer AND TrailerModal)
     if (platform === 'android' && adaptiveFormats.length > 0) {
       const bestVideo = pickBestAdaptiveVideo(adaptiveFormats);
       const bestAudio = pickBestAdaptiveAudio(adaptiveFormats);
 
       if (bestVideo && bestAudio) {
-        const dashUri = buildDashManifest(bestVideo, bestAudio, durationSeconds);
-        if (dashUri) {
+        const mpdFilePath = await writeDashManifestToFile(bestVideo, bestAudio, videoId, durationSeconds);
+        if (mpdFilePath) {
           logger.info(
             'YouTubeExtractor',
-            `DASH manifest built: video itag=${bestVideo.itag} (${formatQualityLabel(bestVideo)}), audio itag=${bestAudio.itag}`
+            `DASH: video=${bestVideo.itag} (${formatQualityLabel(bestVideo)}), audio=${bestAudio.itag}`
           );
           bestStream = {
-            url: dashUri,
+            url: mpdFilePath,        // file:// path, .mpd extension → ExoPlayer auto-detects DASH
             quality: formatQualityLabel(bestVideo),
             mimeType: 'application/dash+xml',
             itag: bestVideo.itag,
@@ -510,22 +518,24 @@ export class YouTubeExtractor {
             bitrate: (bestVideo.bitrate ?? 0) + (bestAudio.bitrate ?? 0),
           };
         } else {
-          logger.warn('YouTubeExtractor', 'DASH manifest build failed, falling back to muxed');
+          logger.warn('YouTubeExtractor', 'DASH file write failed — falling back to muxed');
         }
       } else {
-        logger.info('YouTubeExtractor', `Adaptive: bestVideo=${bestVideo?.itag ?? 'none'}, bestAudio=${bestAudio?.itag ?? 'none'} — falling back to muxed`);
+        logger.info(
+          'YouTubeExtractor',
+          `No adaptive pair: video=${bestVideo?.itag ?? 'none'}, audio=${bestAudio?.itag ?? 'none'} — falling back to muxed`
+        );
       }
     }
 
-    // --- iOS or DASH fallback: use best muxed stream ---
+    // iOS or DASH fallback: use best muxed stream
     if (!bestStream) {
       bestStream = pickBestMuxedStream(muxedFormats);
       if (bestStream) {
-        logger.info('YouTubeExtractor', `Muxed fallback: itag=${bestStream.itag} quality=${bestStream.quality}`);
+        logger.info('YouTubeExtractor', `Muxed: itag=${bestStream.itag} quality=${bestStream.quality}`);
       }
     }
 
-    // Build the full streams list from muxed formats for the result object
     const streams: ExtractedStream[] = muxedFormats.map((f) => ({
       url: f.url!,
       quality: formatQualityLabel(f),
@@ -546,17 +556,17 @@ export class YouTubeExtractor {
   }
 
   /**
-   * Convenience method — returns just the best playable URL or null.
-   * Pass platform so the extractor can choose DASH vs muxed appropriately.
+   * Returns just the best playable URL or null.
+   * Pass platform so the extractor can choose DASH vs muxed.
    */
-  static async getBestStreamUrl(videoIdOrUrl: string, platform?: 'android' | 'ios'): Promise<string | null> {
+  static async getBestStreamUrl(
+    videoIdOrUrl: string,
+    platform?: 'android' | 'ios'
+  ): Promise<string | null> {
     const result = await this.extract(videoIdOrUrl, platform);
     return result?.bestStream?.url ?? null;
   }
 
-  /**
-   * Parse a video ID from any YouTube URL format or bare ID.
-   */
   static parseVideoId(input: string): string | null {
     return extractVideoId(input);
   }
