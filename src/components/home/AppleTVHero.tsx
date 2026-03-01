@@ -440,35 +440,68 @@ const AppleTVHero: React.FC<AppleTVHeroProps> = ({
       thumbnailOpacity.value = withTiming(1, { duration: 300 });
 
       try {
-        // Extract year from metadata
-        const year = currentItem.releaseInfo
-          ? parseInt(currentItem.releaseInfo.split('-')[0], 10)
-          : new Date().getFullYear();
-
         // Extract TMDB ID if available
         const tmdbId = currentItem.id?.startsWith('tmdb:')
           ? currentItem.id.replace('tmdb:', '')
           : undefined;
 
+        if (!tmdbId) {
+          logger.info('[AppleTVHero] No TMDB ID for:', currentItem.name, '- skipping trailer');
+          setTrailerUrl(null);
+          setTrailerLoading(false);
+          return;
+        }
+
         const contentType = currentItem.type === 'series' ? 'tv' : 'movie';
 
-        logger.info('[AppleTVHero] Fetching trailer for:', currentItem.name, year, tmdbId);
+        logger.info('[AppleTVHero] Fetching TMDB videos for:', currentItem.name, 'tmdbId:', tmdbId);
 
-        const url = await TrailerService.getTrailerUrl(
-          currentItem.name,
-          year,
-          tmdbId,
-          contentType
+        // Fetch video list from TMDB to get the YouTube video ID
+        const videosRes = await fetch(
+          `https://api.themoviedb.org/3/${contentType}/${tmdbId}/videos?api_key=d131017ccc6e5462a81c9304d21476de&language=en-US`
+        );
+
+        if (!alive) return;
+
+        if (!videosRes.ok) {
+          logger.warn('[AppleTVHero] TMDB videos fetch failed:', videosRes.status);
+          setTrailerUrl(null);
+          setTrailerLoading(false);
+          return;
+        }
+
+        const videosData = await videosRes.json();
+        const results: any[] = videosData.results ?? [];
+
+        // Pick best YouTube trailer: official trailer > any trailer > teaser > any YouTube video
+        const pick =
+          results.find((v) => v.site === 'YouTube' && v.type === 'Trailer' && v.official) ??
+          results.find((v) => v.site === 'YouTube' && v.type === 'Trailer') ??
+          results.find((v) => v.site === 'YouTube' && v.type === 'Teaser') ??
+          results.find((v) => v.site === 'YouTube');
+
+        if (!alive) return;
+
+        if (!pick) {
+          logger.info('[AppleTVHero] No YouTube video found for:', currentItem.name);
+          setTrailerUrl(null);
+          setTrailerLoading(false);
+          return;
+        }
+
+        logger.info('[AppleTVHero] Extracting stream for videoId:', pick.key, currentItem.name);
+
+        const url = await TrailerService.getTrailerFromVideoId(
+          pick.key,
+          currentItem.name
         );
 
         if (!alive) return;
 
         if (url) {
-          const bestUrl = TrailerService.getBestFormatUrl(url);
-          setTrailerUrl(bestUrl);
-          // logger.info('[AppleTVHero] Trailer URL loaded:', bestUrl);
+          setTrailerUrl(url);
         } else {
-          logger.info('[AppleTVHero] No trailer found for:', currentItem.name);
+          logger.info('[AppleTVHero] No stream extracted for:', currentItem.name);
           setTrailerUrl(null);
         }
       } catch (error) {
