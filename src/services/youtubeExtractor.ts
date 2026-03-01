@@ -111,7 +111,6 @@ const TVHTML5_EMBEDDED_CONTEXT = {
 // These are single-file MP4s ExoPlayer can play directly
 const PREFERRED_MUXED_ITAGS = [
   22,   // 720p MP4 (video+audio)
-  18,   // 360p MP4 (video+audio)
   59,   // 480p MP4 (video+audio) — rare
   78,   // 480p MP4 (video+audio) — rare
   135,  // 480p video-only (fallback)
