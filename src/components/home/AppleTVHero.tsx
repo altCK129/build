@@ -524,10 +524,17 @@ const AppleTVHero: React.FC<AppleTVHeroProps> = ({
   }, [currentItem, currentIndex]); // Removed settings?.showTrailers from dependencies
 
   // Handle trailer preloaded
+  // FIX: Set global trailer playing to true HERE — before the visible player mounts —
+  // so that when the visible player's autoPlay prop is evaluated it is already true,
+  // eliminating the race condition that previously caused the global state effect in
+  // TrailerPlayer to immediately pause the video on first render.
   const handleTrailerPreloaded = useCallback(() => {
+    if (isFocused && !isOutOfView && !trailerShouldBePaused) {
+      setTrailerPlaying(true);
+    }
     setTrailerPreloaded(true);
     logger.info('[AppleTVHero] Trailer preloaded successfully');
-  }, []);
+  }, [isFocused, isOutOfView, trailerShouldBePaused, setTrailerPlaying]);
 
   // Handle trailer ready to play
   const handleTrailerReady = useCallback(() => {
@@ -1111,7 +1118,7 @@ const AppleTVHero: React.FC<AppleTVHeroProps> = ({
                   key={`visible-${trailerUrl}`}
                   ref={trailerVideoRef}
                   trailerUrl={trailerUrl}
-                  autoPlay={globalTrailerPlaying}
+                  autoPlay={!trailerShouldBePaused}
                   muted={trailerMuted}
                   style={StyleSheet.absoluteFillObject}
                   hideLoadingSpinner={true}

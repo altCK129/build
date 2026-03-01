@@ -107,14 +107,38 @@ const TVHTML5_EMBEDDED_CONTEXT = {
   },
 };
 
-// Preferred itags: muxed (video+audio) formats, best quality first
-// These are single-file MP4s ExoPlayer can play directly
+// ---------------------------------------------------------------------------
+// Itag reference tables
+// ---------------------------------------------------------------------------
+
+// Muxed (video+audio in one file) — these are the ONLY formats iOS AVPlayer
+// can play without a DASH bridge. Max quality is 720p (itag 22), often absent.
 const PREFERRED_MUXED_ITAGS = [
   22,   // 720p MP4 (video+audio)
   59,   // 480p MP4 (video+audio) — rare
   78,   // 480p MP4 (video+audio) — rare
-  135,  // 480p video-only (fallback)
-  134,  // 360p video-only (fallback)
+];
+
+// Adaptive video-only itags in descending quality order.
+// ExoPlayer on Android can combine these with an audio stream via DASH.
+const ADAPTIVE_VIDEO_ITAGS_RANKED = [
+  137,  // 1080p MP4 video-only
+  248,  // 1080p WebM video-only
+  136,  // 720p MP4 video-only
+  247,  // 720p WebM video-only
+  135,  // 480p MP4 video-only
+  244,  // 480p WebM video-only
+  134,  // 360p MP4 video-only
+  243,  // 360p WebM video-only
+];
+
+// Adaptive audio-only itags in descending quality order.
+const ADAPTIVE_AUDIO_ITAGS_RANKED = [
+  141,  // 256kbps AAC
+  140,  // 128kbps AAC  ← most common
+  251,  // 160kbps Opus
+  250,  // 70kbps Opus
+  249,  // 50kbps Opus
 ];
 
 const REQUEST_TIMEOUT_MS = 12000;
@@ -181,17 +205,101 @@ function formatQualityLabel(format: InnertubeFormat): string {
 }
 
 function scoreFormat(format: InnertubeFormat): number {
-  // Prioritise:
-  // 1. Preferred itags (pre-muxed MP4 with audio)
-  // 2. Height (higher = better, but cap at 720 for stability)
-  // 3. Bitrate
   const preferredIndex = PREFERRED_MUXED_ITAGS.indexOf(format.itag);
   const itagBonus = preferredIndex !== -1 ? (PREFERRED_MUXED_ITAGS.length - preferredIndex) * 10000 : 0;
   const height = format.height ?? 0;
-  // Don't prefer > 720p because those are usually adaptive-only
   const heightScore = Math.min(height, 720) * 10;
   const bitrateScore = Math.min(format.bitrate ?? 0, 3_000_000) / 1000;
   return itagBonus + heightScore + bitrateScore;
+}
+
+// ---------------------------------------------------------------------------
+// Adaptive stream selection helpers
+// ---------------------------------------------------------------------------
+
+/** Pick the best video-only adaptive format available (MP4 preferred). */
+function pickBestAdaptiveVideo(adaptiveFormats: InnertubeFormat[]): InnertubeFormat | null {
+  const videoOnly = adaptiveFormats.filter(
+    (f) => f.url && f.qualityLabel && !f.audioQuality && f.mimeType.startsWith('video/')
+  );
+  if (videoOnly.length === 0) return null;
+
+  for (const itag of ADAPTIVE_VIDEO_ITAGS_RANKED) {
+    const match = videoOnly.find((f) => f.itag === itag);
+    if (match) return match;
+  }
+  return videoOnly.sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0))[0] ?? null;
+}
+
+/** Pick the best audio-only adaptive format available (AAC preferred). */
+function pickBestAdaptiveAudio(adaptiveFormats: InnertubeFormat[]): InnertubeFormat | null {
+  const audioOnly = adaptiveFormats.filter(
+    (f) => f.url && f.audioQuality && !f.qualityLabel && f.mimeType.startsWith('audio/')
+  );
+  if (audioOnly.length === 0) return null;
+
+  for (const itag of ADAPTIVE_AUDIO_ITAGS_RANKED) {
+    const match = audioOnly.find((f) => f.itag === itag);
+    if (match) return match;
+  }
+  return audioOnly.sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0))[0] ?? null;
+}
+
+/**
+ * Build an in-memory DASH MPD XML that references separate video + audio streams.
+ * ExoPlayer (Android) can parse a data:application/dash+xml;base64,... URI directly.
+ * iOS AVPlayer does NOT support DASH — this path is Android-only.
+ */
+function buildDashManifest(
+  videoFormat: InnertubeFormat,
+  audioFormat: InnertubeFormat,
+  durationSeconds?: number
+): string | null {
+  try {
+    const duration = durationSeconds ?? 300;
+    const mediaDurationISO = `PT${duration}S`;
+
+    const videoCodec = parseMimeType(videoFormat.mimeType).codecs.replace(/"/g, '').trim();
+    const audioCodec = parseMimeType(audioFormat.mimeType).codecs.replace(/"/g, '').trim();
+    const videoMime = videoFormat.mimeType.split(';')[0].trim();
+    const audioMime = audioFormat.mimeType.split(';')[0].trim();
+
+    const width = videoFormat.width ?? 1920;
+    const height = videoFormat.height ?? 1080;
+    const videoBandwidth = videoFormat.bitrate ?? 2_000_000;
+    const audioBandwidth = audioFormat.bitrate ?? 128_000;
+    const audioSampleRate = audioFormat.audioSampleRate ?? '44100';
+
+    const escapeXml = (s: string) =>
+      s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    const videoUrl = escapeXml(videoFormat.url!);
+    const audioUrl = escapeXml(audioFormat.url!);
+
+    const mpd = `<?xml version="1.0" encoding="UTF-8"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="${mediaDurationISO}" minBufferTime="PT2S" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011">
+  <Period duration="${mediaDurationISO}">
+    <AdaptationSet id="1" mimeType="${videoMime}" codecs="${videoCodec}" width="${width}" height="${height}" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
+      <Representation id="v1" bandwidth="${videoBandwidth}" width="${width}" height="${height}">
+        <BaseURL>${videoUrl}</BaseURL>
+        <SegmentBase><Initialization range="0-0"/></SegmentBase>
+      </Representation>
+    </AdaptationSet>
+    <AdaptationSet id="2" mimeType="${audioMime}" codecs="${audioCodec}" lang="en" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
+      <Representation id="a1" bandwidth="${audioBandwidth}" audioSamplingRate="${audioSampleRate}">
+        <BaseURL>${audioUrl}</BaseURL>
+        <SegmentBase><Initialization range="0-0"/></SegmentBase>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>`;
+
+    const b64 = Buffer.from(mpd, 'utf8').toString('base64');
+    return `data:application/dash+xml;base64,${b64}`;
+  } catch (err) {
+    logger.warn('YouTubeExtractor', 'Failed to build DASH manifest:', err);
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -250,34 +358,40 @@ async function fetchPlayerResponse(
   }
 }
 
-function parseFormats(playerResponse: InnertubePlayerResponse): InnertubeFormat[] {
+/**
+ * Returns muxed formats (video+audio) from sd.formats, plus any muxed adaptive formats.
+ * Used as the iOS fallback and the basis for the muxed bestStream.
+ */
+function parseMuxedFormats(playerResponse: InnertubePlayerResponse): InnertubeFormat[] {
   const sd = playerResponse.streamingData;
   if (!sd) return [];
 
   const formats: InnertubeFormat[] = [];
-
-  // Include muxed formats (video+audio in one file)
   for (const f of sd.formats ?? []) {
     if (f.url) formats.push(f);
   }
-
-  // Also scan adaptiveFormats for any that happen to have a direct URL
-  // and look muxed (edge case but occasionally seen)
+  // Edge case: some adaptive formats are actually muxed
   for (const f of sd.adaptiveFormats ?? []) {
     if (f.url && isMuxedFormat(f)) formats.push(f);
   }
-
   return formats;
 }
 
-function pickBestStream(formats: InnertubeFormat[]): ExtractedStream | null {
+/**
+ * Returns all adaptive formats (video-only + audio-only) that have direct URLs.
+ * Used for DASH manifest building on Android.
+ */
+function parseAdaptiveFormats(playerResponse: InnertubePlayerResponse): InnertubeFormat[] {
+  const sd = playerResponse.streamingData;
+  if (!sd) return [];
+  return (sd.adaptiveFormats ?? []).filter((f) => !!f.url);
+}
+
+function pickBestMuxedStream(formats: InnertubeFormat[]): ExtractedStream | null {
   if (formats.length === 0) return null;
 
-  // Filter to MP4 only for maximum ExoPlayer compatibility
   const mp4Formats = formats.filter(isVideoMp4);
   const pool = mp4Formats.length > 0 ? mp4Formats : formats;
-
-  // Sort by score descending
   const sorted = [...pool].sort((a, b) => scoreFormat(b) - scoreFormat(a));
   const best = sorted[0];
 
@@ -299,31 +413,33 @@ function pickBestStream(formats: InnertubeFormat[]): ExtractedStream | null {
 export class YouTubeExtractor {
   /**
    * Extract a playable stream URL from a YouTube video ID or URL.
-   * Tries Android client first (no cipher), then iOS, then TV embedded.
-   * Returns null if all attempts fail.
+   *
+   * Strategy:
+   *  - Android: Try to build a DASH manifest from the best adaptive video +
+   *    audio streams (up to 1080p). Falls back to best muxed stream (≤720p).
+   *  - iOS: Use best muxed stream only (AVPlayer has no DASH support).
+   *
+   * Tries Android Innertube client first, then iOS, then TV Embedded.
    */
-  static async extract(videoIdOrUrl: string): Promise<YouTubeExtractionResult | null> {
+  static async extract(videoIdOrUrl: string, platform?: 'android' | 'ios'): Promise<YouTubeExtractionResult | null> {
     const videoId = extractVideoId(videoIdOrUrl);
     if (!videoId) {
       logger.warn('YouTubeExtractor', `Could not parse video ID from: ${videoIdOrUrl}`);
       return null;
     }
 
-    logger.info('YouTubeExtractor', `Extracting streams for videoId=${videoId}`);
+    logger.info('YouTubeExtractor', `Extracting streams for videoId=${videoId} platform=${platform ?? 'unknown'}`);
 
-    // Try each client in order until we get usable formats
     const clients: Array<{ context: object; userAgent: string; name: string }> = [
       {
         name: 'ANDROID',
         context: ANDROID_CLIENT_CONTEXT,
-        userAgent:
-          'com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip',
+        userAgent: 'com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip',
       },
       {
         name: 'IOS',
         context: IOS_CLIENT_CONTEXT,
-        userAgent:
-          'com.google.ios.youtube/19.09.3 (iPhone14,3; U; CPU iPhone OS 15_6 like Mac OS X)',
+        userAgent: 'com.google.ios.youtube/19.09.3 (iPhone14,3; U; CPU iPhone OS 15_6 like Mac OS X)',
       },
       {
         name: 'TVHTML5_EMBEDDED',
@@ -332,7 +448,8 @@ export class YouTubeExtractor {
       },
     ];
 
-    let bestFormats: InnertubeFormat[] = [];
+    let muxedFormats: InnertubeFormat[] = [];
+    let adaptiveFormats: InnertubeFormat[] = [];
     let playerResponse: InnertubePlayerResponse | null = null;
 
     for (const client of clients) {
@@ -343,33 +460,73 @@ export class YouTubeExtractor {
 
       const status = resp.playabilityStatus?.status;
       if (status === 'UNPLAYABLE' || status === 'LOGIN_REQUIRED') {
-        logger.warn(
-          'YouTubeExtractor',
-          `${client.name} got playabilityStatus=${status} (${resp.playabilityStatus?.reason ?? ''})`
-        );
+        logger.warn('YouTubeExtractor', `${client.name}: playabilityStatus=${status}`);
         continue;
       }
 
-      const formats = parseFormats(resp);
-      if (formats.length > 0) {
-        logger.info(
-          'YouTubeExtractor',
-          `${client.name} returned ${formats.length} usable formats`
-        );
-        bestFormats = formats;
+      const muxed = parseMuxedFormats(resp);
+      const adaptive = parseAdaptiveFormats(resp);
+
+      if (muxed.length > 0 || adaptive.length > 0) {
+        logger.info('YouTubeExtractor', `${client.name}: ${muxed.length} muxed, ${adaptive.length} adaptive formats`);
+        muxedFormats = muxed;
+        adaptiveFormats = adaptive;
         playerResponse = resp;
         break;
       }
 
-      logger.warn('YouTubeExtractor', `${client.name} returned no direct-URL formats`);
+      logger.warn('YouTubeExtractor', `${client.name} returned no usable formats`);
     }
 
-    if (bestFormats.length === 0) {
+    if (muxedFormats.length === 0 && adaptiveFormats.length === 0) {
       logger.warn('YouTubeExtractor', `All clients failed for videoId=${videoId}`);
       return null;
     }
 
-    const streams: ExtractedStream[] = bestFormats.map((f) => ({
+    const details = playerResponse?.videoDetails;
+    const durationSeconds = details?.lengthSeconds ? parseInt(details.lengthSeconds, 10) : undefined;
+
+    // --- Android: attempt high-quality DASH manifest ---
+    let bestStream: ExtractedStream | null = null;
+
+    if (platform === 'android' && adaptiveFormats.length > 0) {
+      const bestVideo = pickBestAdaptiveVideo(adaptiveFormats);
+      const bestAudio = pickBestAdaptiveAudio(adaptiveFormats);
+
+      if (bestVideo && bestAudio) {
+        const dashUri = buildDashManifest(bestVideo, bestAudio, durationSeconds);
+        if (dashUri) {
+          logger.info(
+            'YouTubeExtractor',
+            `DASH manifest built: video itag=${bestVideo.itag} (${formatQualityLabel(bestVideo)}), audio itag=${bestAudio.itag}`
+          );
+          bestStream = {
+            url: dashUri,
+            quality: formatQualityLabel(bestVideo),
+            mimeType: 'application/dash+xml',
+            itag: bestVideo.itag,
+            hasAudio: true,
+            hasVideo: true,
+            bitrate: (bestVideo.bitrate ?? 0) + (bestAudio.bitrate ?? 0),
+          };
+        } else {
+          logger.warn('YouTubeExtractor', 'DASH manifest build failed, falling back to muxed');
+        }
+      } else {
+        logger.info('YouTubeExtractor', `Adaptive: bestVideo=${bestVideo?.itag ?? 'none'}, bestAudio=${bestAudio?.itag ?? 'none'} — falling back to muxed`);
+      }
+    }
+
+    // --- iOS or DASH fallback: use best muxed stream ---
+    if (!bestStream) {
+      bestStream = pickBestMuxedStream(muxedFormats);
+      if (bestStream) {
+        logger.info('YouTubeExtractor', `Muxed fallback: itag=${bestStream.itag} quality=${bestStream.quality}`);
+      }
+    }
+
+    // Build the full streams list from muxed formats for the result object
+    const streams: ExtractedStream[] = muxedFormats.map((f) => ({
       url: f.url!,
       quality: formatQualityLabel(f),
       mimeType: f.mimeType,
@@ -379,40 +536,26 @@ export class YouTubeExtractor {
       bitrate: f.bitrate ?? 0,
     }));
 
-    const bestStream = pickBestStream(bestFormats);
-
-    const details = playerResponse?.videoDetails;
-    const result: YouTubeExtractionResult = {
+    return {
       streams,
       bestStream,
       videoId,
       title: details?.title,
-      durationSeconds: details?.lengthSeconds
-        ? parseInt(details.lengthSeconds, 10)
-        : undefined,
+      durationSeconds,
     };
-
-    if (bestStream) {
-      logger.info(
-        'YouTubeExtractor',
-        `Best stream: itag=${bestStream.itag} quality=${bestStream.quality} mimeType=${bestStream.mimeType}`
-      );
-    }
-
-    return result;
   }
 
   /**
    * Convenience method — returns just the best playable URL or null.
+   * Pass platform so the extractor can choose DASH vs muxed appropriately.
    */
-  static async getBestStreamUrl(videoIdOrUrl: string): Promise<string | null> {
-    const result = await this.extract(videoIdOrUrl);
+  static async getBestStreamUrl(videoIdOrUrl: string, platform?: 'android' | 'ios'): Promise<string | null> {
+    const result = await this.extract(videoIdOrUrl, platform);
     return result?.bestStream?.url ?? null;
   }
 
   /**
    * Parse a video ID from any YouTube URL format or bare ID.
-   * Exposed so callers can validate IDs before calling extract().
    */
   static parseVideoId(input: string): string | null {
     return extractVideoId(input);

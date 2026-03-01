@@ -1,4 +1,5 @@
 import { logger } from '../utils/logger';
+import { Platform } from 'react-native';
 import { YouTubeExtractor } from './youtubeExtractor';
 
 export interface TrailerData {
@@ -41,7 +42,8 @@ export class TrailerService {
     }
 
     try {
-      const url = await YouTubeExtractor.getBestStreamUrl(youtubeVideoId);
+      const platform = Platform.OS === 'android' ? 'android' : 'ios';
+      const url = await YouTubeExtractor.getBestStreamUrl(youtubeVideoId, platform);
       if (url) {
         logger.info('TrailerService', `On-device extraction succeeded for ${youtubeVideoId}`);
         this.setCache(youtubeVideoId, url);
