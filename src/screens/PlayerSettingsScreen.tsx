@@ -494,6 +494,35 @@ const PlayerSettingsScreen: React.FC = () => {
                     ))}
                   </View>
                 </View>
+
+                {/* Dolby Vision Profile 7 → HEVC Fallback */}
+                <View style={[styles.settingItem, styles.settingItemBorder, { borderTopColor: 'rgba(255,255,255,0.08)', borderTopWidth: 1 }]}>
+                  <View style={styles.settingContent}>
+                    <View style={[
+                      styles.settingIconContainer,
+                      { backgroundColor: 'rgba(255,255,255,0.1)' }
+                    ]}>
+                      <MaterialIcons
+                        name="hd"
+                        size={20}
+                        color={currentTheme.colors.primary}
+                      />
+                    </View>
+                    <View style={styles.settingText}>
+                      <Text style={[styles.settingTitle, { color: currentTheme.colors.text }]}>
+                        DV Profile 7 → HEVC Fallback
+                      </Text>
+                      <Text style={[styles.settingDescription, { color: currentTheme.colors.textMuted }]}>
+                        Play Dolby Vision P7 streams as HEVC in ExoPlayer. Disable only if your device supports DV decoding natively.
+                      </Text>
+                    </View>
+                    <Switch
+                      value={settings.dvHevcFallback ?? true}
+                      onValueChange={(value) => updateSetting('dvHevcFallback', value)}
+                      thumbColor={(settings.dvHevcFallback ?? true) ? currentTheme.colors.primary : undefined}
+                    />
+                  </View>
+                </View>
               </>
             )}
 
