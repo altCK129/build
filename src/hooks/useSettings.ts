@@ -109,6 +109,7 @@ export interface AppSettings {
   videoPlayerEngine: 'auto' | 'mpv'; // Video player engine: auto (ExoPlayer primary, MPV fallback) or mpv (MPV only)
   decoderMode: 'auto' | 'sw' | 'hw' | 'hw+'; // Decoder mode: auto (auto-copy), sw (software), hw (mediacodec-copy), hw+ (mediacodec)
   gpuMode: 'gpu' | 'gpu-next'; // GPU rendering mode: gpu (standard) or gpu-next (advanced HDR/color)
+  dvHevcFallback: boolean; // Dolby Vision Profile 7 → HEVC fallback for MKV streams
   showDiscover: boolean;
   // Audio/Subtitle Language Preferences
   preferredSubtitleLanguage: string; // Preferred language for subtitles (ISO 639-1 code, e.g., 'en', 'es', 'fr')
@@ -199,6 +200,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   videoPlayerEngine: 'auto', // Default to auto (ExoPlayer primary, MPV fallback)
   decoderMode: 'auto', // Default to auto (best compatibility and performance)
   gpuMode: 'gpu', // Default to gpu (gpu-next for advanced HDR)
+  dvHevcFallback: true, // Default on — DV P7 MKV streams fall back to HEVC
   showDiscover: true, // Show Discover section in SearchScreen
   // Audio/Subtitle Language Preferences
   preferredSubtitleLanguage: 'en', // Default to English subtitles
