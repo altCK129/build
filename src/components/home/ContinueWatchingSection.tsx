@@ -371,16 +371,9 @@ const ContinueWatchingSection = React.forwardRef<ContinueWatchingRef>((props, re
     };
 
     const compareCwItems = (a: ContinueWatchingItem, b: ContinueWatchingItem): number => {
-      const aProgress = a.progress ?? 0;
-      const bProgress = b.progress ?? 0;
-      const aIsUpNext = a.type === 'series' && aProgress <= 0;
-      const bIsUpNext = b.type === 'series' && bProgress <= 0;
-
-      // Keep active in-progress items ahead of "Up Next" placeholders.
-      if (aIsUpNext !== bIsUpNext) {
-        return aIsUpNext ? 1 : -1;
-      }
-
+      // Sort purely by recency — most recently watched first.
+      // "Up Next" placeholders (progress=0) carry the timestamp of the last watched episode
+      // so they naturally bubble up next to the other recently-watched items.
       return (b.lastUpdated ?? 0) - (a.lastUpdated ?? 0);
     };
 
@@ -1199,13 +1192,13 @@ const ContinueWatchingSection = React.forwardRef<ContinueWatchingRef>((props, re
 
               if (!mostRecentLocal || !highestLocal) return it;
 
-              // IMPORTANT:
-              // In Trakt-auth mode, the "most recently watched" ordering should reflect local playback,
-              // not Trakt's paused_at (which can be stale or even appear newer than local).
-              // So: if we have any local match, use its timestamp for ordering.
-              const mergedLastUpdated = (mostRecentLocal.lastUpdated ?? 0) > 0
-                ? (mostRecentLocal.lastUpdated ?? 0)
-                : (it.lastUpdated ?? 0);
+              // Use the most recent timestamp between local and Trakt.
+              // Always preferring local was wrong: if you watched on another device,
+              // Trakt's paused_at is newer and should win for ordering purposes.
+              const mergedLastUpdated = Math.max(
+                (mostRecentLocal.lastUpdated ?? 0),
+                (it.lastUpdated ?? 0)
+              );
 
               try {
                 logger.log('[CW][Trakt][Overlay] item/local summary', {

@@ -1129,12 +1129,14 @@ const HeroSection: React.FC<HeroSectionProps> = memo(({
   useEffect(() => {
     let alive = true as boolean;
     let timerId: any = null;
-    const fetchTrailer = async () => {
-      if (!metadata?.name || !metadata?.year || !settings?.showTrailers || !isFocused) return;
 
-      // If we expect TMDB ID but don't have it yet, wait a bit more
-      if (!metadata?.tmdbId && metadata?.id?.startsWith('tmdb:')) {
-        logger.info('HeroSection', `Waiting for TMDB ID for ${metadata.name}`);
+    const fetchTrailer = async () => {
+      if (!metadata?.name || !settings?.showTrailers || !isFocused) return;
+
+      // Need a TMDB ID to look up the YouTube video ID
+      const resolvedTmdbId = tmdbId ? String(tmdbId) : undefined;
+      if (!resolvedTmdbId) {
+        logger.info('HeroSection', `No TMDB ID for ${metadata.name} - skipping trailer`);
         return;
       }
 
@@ -1143,51 +1145,66 @@ const HeroSection: React.FC<HeroSectionProps> = memo(({
       setTrailerReady(false);
       setTrailerPreloaded(false);
 
-      try {
-        // Use requestIdleCallback or setTimeout to prevent blocking main thread
-        const fetchWithDelay = () => {
-          // Extract TMDB ID if available
-          const tmdbIdString = tmdbId ? String(tmdbId) : undefined;
+      // Small delay to avoid blocking the UI render
+      timerId = setTimeout(async () => {
+        if (!alive) return;
+
+        try {
           const contentType = type === 'series' ? 'tv' : 'movie';
 
-          // Debug logging to see what we have
-          logger.info('HeroSection', `Trailer request for ${metadata.name}:`, {
-            hasTmdbId: !!tmdbId,
-            tmdbId: tmdbId,
-            contentType,
-            metadataKeys: Object.keys(metadata || {}),
-            metadataId: metadata?.id
-          });
+          logger.info('HeroSection', `Fetching TMDB videos for ${metadata.name} (tmdbId: ${resolvedTmdbId})`);
 
-          TrailerService.getTrailerUrl(metadata.name, metadata.year, tmdbIdString, contentType)
-            .then(url => {
-              if (url) {
-                const bestUrl = TrailerService.getBestFormatUrl(url);
-                setTrailerUrl(bestUrl);
-                logger.info('HeroSection', `Trailer URL loaded for ${metadata.name}${tmdbId ? ` (TMDB: ${tmdbId})` : ''}`);
-              } else {
-                logger.info('HeroSection', `No trailer found for ${metadata.name}`);
-              }
-            })
-            .catch(error => {
-              logger.error('HeroSection', 'Error fetching trailer:', error);
-              setTrailerError(true);
-            })
-            .finally(() => {
-              setTrailerLoading(false);
-            });
-        };
+          // Fetch video list from TMDB to get the YouTube video ID
+          const videosRes = await fetch(
+            `https://api.themoviedb.org/3/${contentType}/${resolvedTmdbId}/videos?api_key=d131017ccc6e5462a81c9304d21476de&language=en-US`
+          );
 
-        // Delay trailer fetch to prevent blocking UI
-        timerId = setTimeout(() => {
           if (!alive) return;
-          fetchWithDelay();
-        }, 100);
-      } catch (error) {
-        logger.error('HeroSection', 'Error in trailer fetch setup:', error);
-        setTrailerError(true);
-        setTrailerLoading(false);
-      }
+
+          if (!videosRes.ok) {
+            logger.warn('HeroSection', `TMDB videos fetch failed: ${videosRes.status} for ${metadata.name}`);
+            setTrailerLoading(false);
+            return;
+          }
+
+          const videosData = await videosRes.json();
+          const results: any[] = videosData.results ?? [];
+
+          // Pick best YouTube trailer: official trailer > any trailer > teaser > any YouTube video
+          const pick =
+            results.find((v) => v.site === 'YouTube' && v.type === 'Trailer' && v.official) ??
+            results.find((v) => v.site === 'YouTube' && v.type === 'Trailer') ??
+            results.find((v) => v.site === 'YouTube' && v.type === 'Teaser') ??
+            results.find((v) => v.site === 'YouTube');
+
+          if (!alive) return;
+
+          if (!pick) {
+            logger.info('HeroSection', `No YouTube video found for ${metadata.name}`);
+            setTrailerLoading(false);
+            return;
+          }
+
+          logger.info('HeroSection', `Extracting stream for videoId: ${pick.key} (${metadata.name})`);
+
+          const url = await TrailerService.getTrailerFromVideoId(pick.key, metadata.name);
+
+          if (!alive) return;
+
+          if (url) {
+            setTrailerUrl(url);
+            logger.info('HeroSection', `Trailer loaded for ${metadata.name}`);
+          } else {
+            logger.info('HeroSection', `No stream extracted for ${metadata.name}`);
+          }
+        } catch (error) {
+          if (!alive) return;
+          logger.error('HeroSection', 'Error fetching trailer:', error);
+          setTrailerError(true);
+        } finally {
+          if (alive) setTrailerLoading(false);
+        }
+      }, 100);
     };
 
     fetchTrailer();
@@ -1195,7 +1212,7 @@ const HeroSection: React.FC<HeroSectionProps> = memo(({
       alive = false;
       try { if (timerId) clearTimeout(timerId); } catch (_e) { }
     };
-  }, [metadata?.name, metadata?.year, tmdbId, settings?.showTrailers, isFocused]);
+  }, [metadata?.name, tmdbId, settings?.showTrailers, isFocused]);
 
   // Shimmer animation removed
 
