@@ -60,7 +60,6 @@ import { storageService } from '../../services/storageService';
 import stremioService from '../../services/stremioService';
 import { WyzieSubtitle, SubtitleCue } from './utils/playerTypes';
 import { findBestSubtitleTrack, findBestAudioTrack } from './utils/trackSelectionUtils';
-import { buildExoAudioTrackName, buildExoSubtitleTrackName } from './android/components/VideoSurface';
 import { useTheme } from '../../contexts/ThemeContext';
 import axios from 'axios';
 
@@ -348,22 +347,20 @@ const AndroidVideoPlayer: React.FC = () => {
     }
 
     if (data.audioTracks) {
-      console.log('[TrackDebug] raw audioTracks:', JSON.stringify(data.audioTracks));
       const formatted = data.audioTracks.map((t: any, i: number) => ({
         // react-native-video selectedAudioTrack {type:'index'} uses 0-based list index.
         id: i,
-        name: buildExoAudioTrackName(t, i),
+        name: t.title || t.name || `Track ${i + 1}`,
         language: t.language
       }));
       tracksHook.setRnVideoAudioTracks(formatted);
     }
     if (data.textTracks) {
-      console.log('[TrackDebug] raw textTracks:', JSON.stringify(data.textTracks));
       const formatted = data.textTracks.map((t: any, i: number) => ({
         // react-native-video selectedTextTrack {type:'index'} uses 0-based list index.
         // Using `t.index` can be non-unique/misaligned and breaks selection/rendering.
         id: i,
-        name: buildExoSubtitleTrackName(t, i),
+        name: t.title || t.name || `Track ${i + 1}`,
         language: t.language
       }));
       tracksHook.setRnVideoTextTracks(formatted);
@@ -838,6 +835,7 @@ const AndroidVideoPlayer: React.FC = () => {
             screenDimensions={playerState.screenDimensions}
             decoderMode={settings.decoderMode}
             gpuMode={settings.gpuMode}
+            dvHevcFallback={settings.dvHevcFallback ?? true}
             // Dual video engine props
             useExoPlayer={useExoPlayer}
             onCodecError={handleCodecError}
