@@ -497,6 +497,30 @@ const PlayerSettingsScreen: React.FC = () => {
               </>
             )}
 
+            {/* DV Profile 7 → HEVC Fallback */}
+            {Platform.OS === 'android' && settings.preferredPlayer === 'internal' && (
+              <View style={[styles.settingItem, styles.settingItemBorder, { borderBottomWidth: 0, borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.08)' }]}>
+                <View style={styles.settingContent}>
+                  <View style={[styles.settingIconContainer, { backgroundColor: 'rgba(255,255,255,0.1)' }]}>
+                    <MaterialIcons name="hd" size={20} color={currentTheme.colors.primary} />
+                  </View>
+                  <View style={styles.settingText}>
+                    <Text style={[styles.settingTitle, { color: currentTheme.colors.text }]}>
+                      DV Profile 7 → HEVC Fallback
+                    </Text>
+                    <Text style={[styles.settingDescription, { color: currentTheme.colors.textMuted }]}>
+                      Fixes black screen when playing Dolby Vision MKV streams on devices without DV display support.
+                    </Text>
+                  </View>
+                  <Switch
+                    value={settings.dvHevcFallback ?? true}
+                    onValueChange={(value) => updateSetting('dvHevcFallback', value)}
+                    thumbColor={(settings.dvHevcFallback ?? true) ? currentTheme.colors.primary : undefined}
+                  />
+                </View>
+              </View>
+            )}
+
             {/* External Player for Downloads */}
             {((Platform.OS === 'android' && settings.useExternalPlayer) ||
               (Platform.OS === 'ios' && settings.preferredPlayer !== 'internal')) && (
