@@ -66,23 +66,6 @@ jobs:
       - name: Apply patches
         run: npx patch-package
 
-      - name: Find Media3 AAR
-        run: |
-           find ~/.gradle -name "media3-exoplayer-*.aar" 2>/dev/null
-           find ~/.gradle -name "*.aar" 2>/dev/null | grep media3-exoplayer
-           find /root/.gradle -name "media3-exoplayer-*.aar" 2>/dev/null
-           find /home -name "media3-exoplayer-*.aar" 2>/dev/null
-
-      - name: Find and upload Media3 AAR
-        run: find ~/.gradle/caches -name "media3-exoplayer-*.aar" | head -5
-
-      - name: Upload Media3 AAR
-        uses: actions/upload-artifact@v4
-        with:
-          name: media3-exoplayer
-          path: ~/.gradle/caches/modules-2/files-2.1/androidx.media3/media3-exoplayer/**/*.aar
-
-
       - name: Make gradlew executable
         run: chmod +x android/gradlew
 
@@ -96,7 +79,7 @@ jobs:
           if [ "${{ inputs.build_type }}" = "release" ]; then
             ./gradlew assembleRelease --no-daemon --stacktrace --rerun-tasks
           else
-           ./gradlew assembleDebug --no-daemon --stacktrace --rerun-tasks
+            ./gradlew assembleDebug --no-daemon --stacktrace --rerun-tasks
           fi
 
       - name: List APK outputs
@@ -108,4 +91,19 @@ jobs:
           name: nuvio-${{ inputs.build_type }}-${{ inputs.commit_sha != '' && inputs.commit_sha || github.sha }}-run${{ github.run_number }}
           path: android/app/build/outputs/apk/${{ inputs.build_type }}/*.apk
           retention-days: 30
+
+      # --- Temporary step to extract Media3 AAR for patching ---
+      - name: Find Media3 exoplayer AAR
+        run: |
+          echo "=== Searching for media3-exoplayer AAR ==="
+          find ~/.gradle/caches -name "*.aar" | grep "media3-exoplayer" | head -10
+          echo "=== All media3 AARs ==="
+          find ~/.gradle/caches -name "*.aar" | grep media3 | head -20
+
+      - name: Upload Media3 exoplayer AAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: media3-exoplayer-aar
+          path: ~/.gradle/caches/modules-2/files-2.1/androidx.media3/media3-exoplayer/**/*.aar
+          if-no-files-found: warn
           
