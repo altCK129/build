@@ -211,11 +211,9 @@ sentry {
 
 configurations.all {
     exclude group: 'com.caverock', module: 'androidsvg'
-    resolutionStrategy {
-        // Force our patched media3-exoplayer AAR (1.8.0 + DV P7 MediaFormat profile fix)
-        // over whatever version react-native-video pulls transitively from Maven.
-        force 'androidx.media3:media3-exoplayer:1.8.0'
-    }
+    // Exclude the Maven media3-exoplayer so our local patched AAR is the only copy.
+    // Without this, Gradle links both and throws duplicate class errors.
+    exclude group: 'androidx.media3', module: 'media3-exoplayer'
 }
 
 dependencies {
