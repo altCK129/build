@@ -70,7 +70,7 @@ jobs:
         run: find ~/.gradle/caches -name "media3-exoplayer-*.aar" | head -5
 
       - name: Upload Media3 AAR
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: media3-exoplayer
           path: ~/.gradle/caches/modules-2/files-2.1/androidx.media3/media3-exoplayer/**/*.aar
