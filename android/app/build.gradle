@@ -95,8 +95,8 @@ android {
         applicationId 'com.nuvio.app'
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 37
-        versionName "1.4.1"
+        versionCode 36
+        versionName "1.4.0"
 
         buildConfigField "String", "REACT_NATIVE_RELEASE_LEVEL", "\"${findProperty('reactNativeReleaseLevel') ?: 'stable'}\""
     }
@@ -118,7 +118,7 @@ android {
     def abiVersionCodes = ['armeabi-v7a': 1, 'arm64-v8a': 2, 'x86': 3, 'x86_64': 4]
     applicationVariants.all { variant ->
         variant.outputs.each { output ->
-            def baseVersionCode = 37 // Current versionCode 37 from defaultConfig
+            def baseVersionCode = 36 // Current versionCode 36 from defaultConfig
             def abiName = output.getFilter(com.android.build.OutputFile.ABI)
 
             def versionCode = baseVersionCode * 100 // Base multiplier
@@ -211,6 +211,12 @@ sentry {
 
 configurations.all {
     exclude group: 'com.caverock', module: 'androidsvg'
+    resolutionStrategy {
+        // Force Just Player's patched Media3 exoplayer AAR (with setMapDV7ToHevc support)
+        // to override the transitive Maven dependency pulled in by react-native-video.
+        // The patched AAR adds Dolby Vision Profile 7 → HEVC fallback support.
+        force 'androidx.media3:media3-exoplayer:1.10.0-beta01'
+    }
 }
 
 dependencies {
@@ -246,6 +252,11 @@ dependencies {
 
     // Include only FFmpeg decoder AAR to avoid duplicates with Maven Media3
     implementation files("libs/lib-decoder-ffmpeg-release.aar")
+
+    // Just Player's patched Media3 exoplayer AAR — adds setMapDV7ToHevc() to
+    // DefaultRenderersFactory for Dolby Vision Profile 7 → HEVC fallback support.
+    // This overrides the standard androidx.media3:media3-exoplayer Maven dependency.
+    implementation files("libs/lib-exoplayer-release.aar")
     
     // MPV Player library
     implementation files("libs/libmpv-release.aar")
