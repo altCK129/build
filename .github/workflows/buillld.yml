@@ -66,6 +66,15 @@ jobs:
       - name: Apply patches
         run: npx patch-package
 
+      - name: Find and upload Media3 AAR
+        run: find ~/.gradle/caches -name "media3-exoplayer-*.aar" | head -5
+
+      - name: Upload Media3 AAR
+        uses: actions/upload-artifact@v3
+        with:
+          name: media3-exoplayer
+          path: ~/.gradle/caches/modules-2/files-2.1/androidx.media3/media3-exoplayer/**/*.aar
+
 
       - name: Make gradlew executable
         run: chmod +x android/gradlew
