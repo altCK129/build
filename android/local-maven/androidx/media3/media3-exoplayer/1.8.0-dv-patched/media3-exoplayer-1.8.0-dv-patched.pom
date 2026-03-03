@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>androidx.media3</groupId>
+  <artifactId>media3-exoplayer</artifactId>
+  <version>1.8.0-dv-patched</version>
+  <packaging>aar</packaging>
+  <name>media3-exoplayer (DV P7 patched)</name>
+</project>
