@@ -371,16 +371,9 @@ const ContinueWatchingSection = React.forwardRef<ContinueWatchingRef>((props, re
     };
 
     const compareCwItems = (a: ContinueWatchingItem, b: ContinueWatchingItem): number => {
-      const aProgress = a.progress ?? 0;
-      const bProgress = b.progress ?? 0;
-      const aIsUpNext = a.type === 'series' && aProgress <= 0;
-      const bIsUpNext = b.type === 'series' && bProgress <= 0;
-
-      // Keep active in-progress items ahead of "Up Next" placeholders.
-      if (aIsUpNext !== bIsUpNext) {
-        return aIsUpNext ? 1 : -1;
-      }
-
+      // Sort purely by recency — most recently watched first.
+      // "Up Next" placeholders (progress=0) carry the timestamp of the last watched episode
+      // so they naturally bubble up next to the other recently-watched items.
       return (b.lastUpdated ?? 0) - (a.lastUpdated ?? 0);
     };
 
@@ -463,44 +456,25 @@ const ContinueWatchingSection = React.forwardRef<ContinueWatchingRef>((props, re
 
       if (validItems.length === 0) return;
 
-      // 2. Single state update for the entire batch.
-      // Key per episode (type:id:season:episode) so different episodes of the same
-      // show don't overwrite each other during concurrent group resolution.
-      // After merging we collapse to one item per show (most recently watched) so
-      // the UI still shows one card per title, ordered newest-first.
+      // 2. Single state update for the entire batch
       setContinueWatchingItems((prev) => {
-        const episodeMap = new Map<string, ContinueWatchingItem>();
-
-        // Seed with existing items using per-episode keys
+        const map = new Map<string, ContinueWatchingItem>();
+        // Add existing items
         for (const it of prev) {
-          const epKey = it.type === 'series' && it.season != null && it.episode != null
-            ? `${it.type}:${it.id}:${it.season}:${it.episode}`
-            : `${it.type}:${it.id}`;
-          episodeMap.set(epKey, it);
+          map.set(`${it.type}:${it.id}`, it);
         }
 
-        // Merge new valid items — prefer newer lastUpdated for the same episode
+        // Merge new valid items
         for (const it of validItems) {
-          const epKey = it.type === 'series' && it.season != null && it.episode != null
-            ? `${it.type}:${it.id}:${it.season}:${it.episode}`
-            : `${it.type}:${it.id}`;
-          const existing = episodeMap.get(epKey);
+          const key = `${it.type}:${it.id}`;
+          const existing = map.get(key);
+          // Prefer local when it is ahead; otherwise, prefer newer
           if (!existing || shouldPreferCandidate(it, existing)) {
-            episodeMap.set(epKey, it);
+            map.set(key, it);
           }
         }
 
-        // Collapse to one item per show: keep the episode with the highest lastUpdated
-        const showMap = new Map<string, ContinueWatchingItem>();
-        for (const it of episodeMap.values()) {
-          const showKey = `${it.type}:${it.id}`;
-          const existing = showMap.get(showKey);
-          if (!existing || (it.lastUpdated ?? 0) > (existing.lastUpdated ?? 0)) {
-            showMap.set(showKey, it);
-          }
-        }
-
-        const merged = Array.from(showMap.values());
+        const merged = Array.from(map.values());
         merged.sort(compareCwItems);
 
         return merged;
@@ -874,6 +848,36 @@ const ContinueWatchingSection = React.forwardRef<ContinueWatchingRef>((props, re
 
           const traktBatch: ContinueWatchingItem[] = [];
 
+          // Pre-fetch watched shows so both Step 1 and Step 2 can use the watched episode sets
+          // This fixes "Up Next" suggesting already-watched episodes when the watched set is missing
+          let watchedShowsData: Awaited<ReturnType<typeof traktService.getWatchedShows>> = [];
+          // Map from showImdb -> Set of "imdb:season:episode" strings
+          const watchedEpisodeSetByShow = new Map<string, Set<string>>();
+          try {
+            watchedShowsData = await traktService.getWatchedShows();
+            for (const ws of watchedShowsData) {
+              if (!ws.show?.ids?.imdb) continue;
+              const imdb = ws.show.ids.imdb.startsWith('tt') ? ws.show.ids.imdb : `tt${ws.show.ids.imdb}`;
+              const resetAt = ws.reset_at ? new Date(ws.reset_at).getTime() : 0;
+              const episodeSet = new Set<string>();
+              if (ws.seasons) {
+                for (const season of ws.seasons) {
+                  for (const episode of season.episodes) {
+                    // Respect reset_at: skip episodes watched before the reset
+                    if (resetAt > 0) {
+                      const watchedAt = new Date(episode.last_watched_at).getTime();
+                      if (watchedAt < resetAt) continue;
+                    }
+                    episodeSet.add(`${imdb}:${season.number}:${episode.number}`);
+                  }
+                }
+              }
+              watchedEpisodeSetByShow.set(imdb, episodeSet);
+            }
+          } catch {
+            // Non-fatal — fall back to no watched set
+          }
+
           // STEP 1: Process playback progress items (in-progress, paused)
           // These have actual progress percentage from Trakt
           const thirtyDaysAgo = Date.now() - (30 * 24 * 60 * 60 * 1000);
@@ -937,11 +941,13 @@ const ContinueWatchingSection = React.forwardRef<ContinueWatchingRef>((props, re
                 if (item.progress >= 85) {
                   const metadata = cachedData.metadata;
                   if (metadata?.videos) {
+                    // Use pre-fetched watched set so already-watched episodes are skipped
+                    const watchedSetForShow = watchedEpisodeSetByShow.get(showImdb);
                     const nextEpisode = findNextEpisode(
                       item.episode.season,
                       item.episode.number,
                       metadata.videos,
-                      undefined, // No watched set needed, findNextEpisode handles it
+                      watchedSetForShow,
                       showImdb
                     );
 
@@ -984,13 +990,13 @@ const ContinueWatchingSection = React.forwardRef<ContinueWatchingRef>((props, re
             }
           }
 
-          // STEP 2: Get watched shows and find "Up Next" episodes
-          // This handles cases where episodes are fully completed and removed from playback progress
+          // STEP 2: Find "Up Next" episodes using pre-fetched watched shows data
+          // Reuses watchedShowsData fetched before Step 1 — no extra API call
+          // Also respects reset_at (Bug 4 fix) and uses pre-built watched episode sets (Bug 3 fix)
           try {
-            const watchedShows = await traktService.getWatchedShows();
             const thirtyDaysAgoForShows = Date.now() - (30 * 24 * 60 * 60 * 1000);
 
-            for (const watchedShow of watchedShows) {
+            for (const watchedShow of watchedShowsData) {
               try {
                 if (!watchedShow.show?.ids?.imdb) continue;
 
@@ -1006,7 +1012,9 @@ const ContinueWatchingSection = React.forwardRef<ContinueWatchingRef>((props, re
                 const showKey = `series:${showImdb}`;
                 if (recentlyRemovedRef.current.has(showKey)) continue;
 
-                // Find the last watched episode
+                const resetAt = watchedShow.reset_at ? new Date(watchedShow.reset_at).getTime() : 0;
+
+                // Find the last watched episode (respecting reset_at)
                 let lastWatchedSeason = 0;
                 let lastWatchedEpisode = 0;
                 let latestEpisodeTimestamp = 0;
@@ -1015,6 +1023,8 @@ const ContinueWatchingSection = React.forwardRef<ContinueWatchingRef>((props, re
                   for (const season of watchedShow.seasons) {
                     for (const episode of season.episodes) {
                       const episodeTimestamp = new Date(episode.last_watched_at).getTime();
+                      // Skip episodes watched before the user reset their progress
+                      if (resetAt > 0 && episodeTimestamp < resetAt) continue;
                       if (episodeTimestamp > latestEpisodeTimestamp) {
                         latestEpisodeTimestamp = episodeTimestamp;
                         lastWatchedSeason = season.number;
@@ -1030,15 +1040,8 @@ const ContinueWatchingSection = React.forwardRef<ContinueWatchingRef>((props, re
                 const cachedData = await getCachedMetadata('series', showImdb);
                 if (!cachedData?.basicContent || !cachedData?.metadata?.videos) continue;
 
-                // Build a set of watched episodes for this show
-                const watchedEpisodeSet = new Set<string>();
-                if (watchedShow.seasons) {
-                  for (const season of watchedShow.seasons) {
-                    for (const episode of season.episodes) {
-                      watchedEpisodeSet.add(`${showImdb}:${season.number}:${episode.number}`);
-                    }
-                  }
-                }
+                // Use pre-built watched episode set (already respects reset_at)
+                const watchedEpisodeSet = watchedEpisodeSetByShow.get(showImdb) ?? new Set<string>();
 
                 // Find the next unwatched episode
                 const nextEpisode = findNextEpisode(
@@ -1073,13 +1076,24 @@ const ContinueWatchingSection = React.forwardRef<ContinueWatchingRef>((props, re
 
           // Trakt mode: show ONLY Trakt items, but override progress with local if local is higher.
           if (traktBatch.length > 0) {
-            // Dedupe (keep most recent per show/movie)
+            // Dedupe (keep in-progress over "Up Next"; then prefer most recent)
             const deduped = new Map<string, ContinueWatchingItem>();
             for (const item of traktBatch) {
               const key = `${item.type}:${item.id}`;
               const existing = deduped.get(key);
-              if (!existing || (item.lastUpdated ?? 0) > (existing.lastUpdated ?? 0)) {
+              if (!existing) {
                 deduped.set(key, item);
+              } else {
+                const existingHasProgress = (existing.progress ?? 0) > 0;
+                const candidateHasProgress = (item.progress ?? 0) > 0;
+                if (candidateHasProgress && !existingHasProgress) {
+                  // Always prefer actual in-progress over "Up Next" placeholder
+                  deduped.set(key, item);
+                } else if (!candidateHasProgress && existingHasProgress) {
+                  // Keep existing in-progress item
+                } else if ((item.lastUpdated ?? 0) > (existing.lastUpdated ?? 0)) {
+                  deduped.set(key, item);
+                }
               }
             }
 
@@ -1178,13 +1192,13 @@ const ContinueWatchingSection = React.forwardRef<ContinueWatchingRef>((props, re
 
               if (!mostRecentLocal || !highestLocal) return it;
 
-              // IMPORTANT:
-              // In Trakt-auth mode, the "most recently watched" ordering should reflect local playback,
-              // Use Trakt's paused_at as the primary ordering timestamp (it.lastUpdated),
-              // falling back to local lastUpdated only if Trakt has no timestamp.
-              const mergedLastUpdated = (it.lastUpdated ?? 0) > 0
-                ? (it.lastUpdated ?? 0)
-                : (mostRecentLocal.lastUpdated ?? 0);
+              // Use the most recent timestamp between local and Trakt.
+              // Always preferring local was wrong: if you watched on another device,
+              // Trakt's paused_at is newer and should win for ordering purposes.
+              const mergedLastUpdated = Math.max(
+                (mostRecentLocal.lastUpdated ?? 0), 
+                (it.lastUpdated ?? 0)
+              );
 
               try {
                 logger.log('[CW][Trakt][Overlay] item/local summary', {
@@ -2242,14 +2256,7 @@ const ContinueWatchingSection = React.forwardRef<ContinueWatchingRef>((props, re
       </View>
 
       <FlatList
-        data={[...continueWatchingItems].sort((a, b) => {
-          const aProgress = a.progress ?? 0;
-          const bProgress = b.progress ?? 0;
-          const aIsUpNext = a.type === 'series' && aProgress <= 0;
-          const bIsUpNext = b.type === 'series' && bProgress <= 0;
-          if (aIsUpNext !== bIsUpNext) return aIsUpNext ? 1 : -1;
-          return (b.lastUpdated ?? 0) - (a.lastUpdated ?? 0);
-        })}
+        data={continueWatchingItems}
         renderItem={renderContinueWatchingItem}
         keyExtractor={keyExtractor}
         horizontal
