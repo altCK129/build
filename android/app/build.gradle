@@ -250,6 +250,9 @@ dependencies {
     // MPV Player library
     implementation files("libs/libmpv-release.aar")
 
+    // libass-android: ASS/SSA subtitle rendering via ExoPlayer/Media3
+    implementation "io.github.peerless2012:ass-media:0.3.0-rc03"
+
     // Google Cast Framework
     implementation "com.google.android.gms:play-services-cast-framework:${safeExtGet('castFrameworkVersion', '+')}"
 }
