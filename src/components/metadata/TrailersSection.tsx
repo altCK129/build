@@ -72,7 +72,7 @@ const TrailersSection: React.FC<TrailersSectionProps> = memo(({
   const [modalVisible, setModalVisible] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState<string>('Trailer');
   const [dropdownVisible, setDropdownVisible] = useState(false);
-  const [backendAvailable, setBackendAvailable] = useState<boolean | null>(null);
+
 
   // Enhanced responsive sizing for tablets and TV screens
   const deviceWidth = Dimensions.get('window').width;
@@ -165,7 +165,6 @@ const TrailersSection: React.FC<TrailersSectionProps> = memo(({
 
     const initializeTrailers = async () => {
       resetSectionAnimation();
-      setBackendAvailable(true); // Assume available, let TrailerService handle errors
       await fetchTrailers();
     };
 
@@ -457,11 +456,6 @@ const TrailersSection: React.FC<TrailersSectionProps> = memo(({
 
   if (!tmdbId) {
     return null; // Don't show if no TMDB ID
-  }
-
-  // Don't render if backend availability is still being checked or backend is unavailable
-  if (backendAvailable === null || backendAvailable === false) {
-    return null;
   }
 
   // Don't render if TMDB enrichment is disabled
