@@ -13,19 +13,23 @@ interface CacheEntry {
   expiresAt: number;
 }
 
+// ---------------------------------------------------------------------------
+// Innertube search constants
+// ---------------------------------------------------------------------------
+
+const INNERTUBE_SEARCH_URL = 'https://www.youtube.com/youtubei/v1/search?prettyPrint=false';
+const SEARCH_TIMEOUT_MS = 10000;
+
+const WEB_SEARCH_CONTEXT = {
+  client: {
+    clientName: 'WEB',
+    clientVersion: '2.20240726.00.00',
+    hl: 'en',
+    gl: 'US',
+  },
+};
+
 export class TrailerService {
-  // ---- Remote server (fallback only) ----
-  private static readonly ENV_LOCAL_BASE =
-    process.env.EXPO_PUBLIC_TRAILER_LOCAL_BASE || 'http://46.62.173.157:3001';
-  private static readonly ENV_LOCAL_TRAILER_PATH =
-    process.env.EXPO_PUBLIC_TRAILER_LOCAL_TRAILER_PATH || '/trailer';
-  private static readonly ENV_LOCAL_SEARCH_PATH =
-    process.env.EXPO_PUBLIC_TRAILER_LOCAL_SEARCH_PATH || '/search-trailer';
-
-  private static readonly LOCAL_SERVER_URL = `${TrailerService.ENV_LOCAL_BASE}${TrailerService.ENV_LOCAL_TRAILER_PATH}`;
-  private static readonly AUTO_SEARCH_URL = `${TrailerService.ENV_LOCAL_BASE}${TrailerService.ENV_LOCAL_SEARCH_PATH}`;
-  private static readonly SERVER_TIMEOUT = 20000;
-
   // YouTube CDN URLs expire ~6h; cache for 5h
   private static readonly CACHE_TTL_MS = 5 * 60 * 60 * 1000;
   private static urlCache = new Map<string, CacheEntry>();
@@ -36,7 +40,7 @@ export class TrailerService {
 
   /**
    * Get a playable stream URL from a raw YouTube video ID (e.g. from TMDB).
-   * Tries on-device extraction first, falls back to remote server.
+   * Extracts on-device via Innertube — no server involved.
    */
   static async getTrailerFromVideoId(
     youtubeVideoId: string,
@@ -53,7 +57,6 @@ export class TrailerService {
       return cached;
     }
 
-    // 1. On-device extraction via Innertube
     try {
       const platform = Platform.OS === 'android' ? 'android' : 'ios';
       const url = await YouTubeExtractor.getBestStreamUrl(youtubeVideoId, platform);
@@ -67,16 +70,6 @@ export class TrailerService {
       logger.warn('TrailerService', `On-device extraction threw for ${youtubeVideoId}:`, err);
     }
 
-    // 2. Server fallback
-    logger.info('TrailerService', `Falling back to server for ${youtubeVideoId}`);
-    const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeVideoId}`;
-    const serverUrl = await this.fetchFromServer(youtubeUrl, title, year?.toString());
-    if (serverUrl) {
-      this.setCache(youtubeVideoId, serverUrl);
-      return serverUrl;
-    }
-
-    logger.warn('TrailerService', `Both on-device and server failed for ${youtubeVideoId}`);
     return null;
   }
 
@@ -94,8 +87,7 @@ export class TrailerService {
     const videoId = YouTubeExtractor.parseVideoId(youtubeUrl);
     if (!videoId) {
       logger.warn('TrailerService', `Could not parse video ID from: ${youtubeUrl}`);
-      // No video ID — try server directly with the raw URL
-      return this.fetchFromServer(youtubeUrl, title, year);
+      return null;
     }
 
     return this.getTrailerFromVideoId(
@@ -107,7 +99,7 @@ export class TrailerService {
 
   /**
    * Called by AppleTVHero and HeroSection which only have title/year/tmdbId.
-   * No YouTube video ID available — goes straight to server search.
+   * Searches YouTube on-device via Innertube, then extracts the best stream.
    */
   static async getTrailerUrl(
     title: string,
@@ -115,24 +107,28 @@ export class TrailerService {
     tmdbId?: string,
     type?: 'movie' | 'tv'
   ): Promise<string | null> {
-    logger.warn(
-      'TrailerService',
-      `getTrailerUrl called for "${title}" — no YouTube video ID, using server search`
-    );
+    logger.info('TrailerService', `getTrailerUrl: searching on-device for "${title}" (${year})`);
 
     const cacheKey = `search:${title}:${year}:${tmdbId ?? ''}`;
     const cached = this.getCached(cacheKey);
     if (cached) return cached;
 
-    const serverResult = await this.getTrailerFromServer(title, year, tmdbId, type);
-    if (serverResult) {
-      this.setCache(cacheKey, serverResult);
+    const videoId = await this.searchYouTubeForTrailer(title, year, type);
+    if (!videoId) {
+      logger.warn('TrailerService', `YouTube search returned no results for "${title}"`);
+      return null;
     }
-    return serverResult;
+
+    logger.info('TrailerService', `YouTube search found videoId=${videoId} for "${title}"`);
+    const url = await this.getTrailerFromVideoId(videoId, title, year);
+    if (url) {
+      this.setCache(cacheKey, url);
+    }
+    return url;
   }
 
   // ---------------------------------------------------------------------------
-  // Unchanged public helpers (API compatibility)
+  // Public helpers (API compatibility)
   // ---------------------------------------------------------------------------
 
   static getBestFormatUrl(url: string): string {
@@ -157,85 +153,125 @@ export class TrailerService {
     return { url: this.getBestFormatUrl(url), title, year };
   }
 
+  /** No-op — kept for API compatibility with any callers that still reference it */
   static setUseLocalServer(_useLocal: boolean): void {
-    logger.info('TrailerService', 'setUseLocalServer: server used as fallback only');
+    logger.info('TrailerService', 'setUseLocalServer: no-op, server removed');
   }
 
   static getServerStatus(): { usingLocal: boolean; localUrl: string } {
-    return { usingLocal: true, localUrl: this.LOCAL_SERVER_URL };
+    return { usingLocal: false, localUrl: '' };
   }
 
   static async testServers(): Promise<{
     localServer: { status: 'online' | 'offline'; responseTime?: number };
   }> {
-    try {
-      const t = Date.now();
-      const r = await fetch(`${this.AUTO_SEARCH_URL}?title=test&year=2023`, {
-        signal: AbortSignal.timeout(5000),
-      });
-      if (r.ok || r.status === 404) {
-        return { localServer: { status: 'online', responseTime: Date.now() - t } };
-      }
-    } catch { /* offline */ }
     return { localServer: { status: 'offline' } };
   }
 
   // ---------------------------------------------------------------------------
-  // Private — server requests
+  // Private — on-device YouTube search via Innertube
   // ---------------------------------------------------------------------------
 
-  private static async getTrailerFromServer(
+  /**
+   * Uses the Innertube search endpoint to find the best trailer video ID
+   * for a given title/year. Returns the first result whose title contains
+   * "trailer" (case-insensitive), or the first result overall as a fallback.
+   */
+  private static async searchYouTubeForTrailer(
     title: string,
     year: number,
-    tmdbId?: string,
     type?: 'movie' | 'tv'
   ): Promise<string | null> {
-    const params = new URLSearchParams({ title, year: year.toString() });
-    if (tmdbId) {
-      params.append('tmdbId', tmdbId);
-      params.append('type', type ?? 'movie');
-    }
-    return this.doServerFetch(`${this.AUTO_SEARCH_URL}?${params}`);
-  }
+    const mediaType = type === 'tv' ? 'series' : 'movie';
+    const query = `${title} ${year} ${mediaType} official trailer`;
 
-  private static async fetchFromServer(
-    youtubeUrl: string,
-    title?: string,
-    year?: string
-  ): Promise<string | null> {
-    const params = new URLSearchParams({ youtube_url: youtubeUrl });
-    if (title) params.append('title', title);
-    if (year) params.append('year', year);
-    return this.doServerFetch(`${this.LOCAL_SERVER_URL}?${params}`);
-  }
-
-  private static async doServerFetch(url: string): Promise<string | null> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.SERVER_TIMEOUT);
+    const timer = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
+
     try {
-      const res = await fetch(url, {
-        headers: { Accept: 'application/json', 'User-Agent': 'Nuvio/1.0' },
-        signal: controller.signal,
-      });
+      const response = await fetch(
+        INNERTUBE_SEARCH_URL,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-YouTube-Client-Name': '1',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
+            'Origin': 'https://www.youtube.com',
+            'Referer': 'https://www.youtube.com/',
+          },
+          body: JSON.stringify({
+            query,
+            context: WEB_SEARCH_CONTEXT,
+            params: 'EgIQAQ%3D%3D', // filter: videos only
+          }),
+          signal: controller.signal,
+        }
+      );
+
       clearTimeout(timer);
-      if (!res.ok) {
-        logger.warn('TrailerService', `Server ${res.status} for ${url}`);
+
+      if (!response.ok) {
+        logger.warn('TrailerService', `Innertube search HTTP ${response.status} for "${query}"`);
         return null;
       }
-      const data = await res.json();
-      if (!data.url || !this.isValidTrailerUrl(data.url)) {
-        logger.warn('TrailerService', `Server returned invalid URL: ${data.url}`);
-        return null;
-      }
-      logger.info('TrailerService', `Server fallback succeeded: ${String(data.url).substring(0, 80)}`);
-      return data.url as string;
+
+      const data = await response.json();
+      return this.parseSearchResultVideoId(data, title);
     } catch (err) {
       clearTimeout(timer);
       if (err instanceof Error && err.name === 'AbortError') {
-        logger.warn('TrailerService', `Server timed out: ${url}`);
+        logger.warn('TrailerService', `Innertube search timed out for "${query}"`);
       } else {
-        logger.warn('TrailerService', `Server fetch error:`, err);
+        logger.warn('TrailerService', `Innertube search error:`, err);
       }
+      return null;
+    }
+  }
+
+  /**
+   * Walks the Innertube search response JSON and picks the best video ID.
+   * Prefers results with "trailer" in the title, falls back to first video found.
+   */
+  private static parseSearchResultVideoId(data: any, title: string): string | null {
+    try {
+      const contents =
+        data?.contents?.twoColumnSearchResultsRenderer?.primaryContents
+          ?.sectionListRenderer?.contents ?? [];
+
+      const videoRenderers: Array<{ videoId: string; titleText: string }> = [];
+
+      for (const section of contents) {
+        const items = section?.itemSectionRenderer?.contents ?? [];
+        for (const item of items) {
+          const vr = item?.videoRenderer;
+          if (!vr?.videoId) continue;
+          const titleText: string =
+            vr.title?.runs?.map((r: any) => r.text).join('') ?? '';
+          videoRenderers.push({ videoId: vr.videoId, titleText });
+        }
+      }
+
+      if (videoRenderers.length === 0) {
+        logger.warn('TrailerService', 'Innertube search: no video renderers found in response');
+        return null;
+      }
+
+      // Prefer a result that mentions "trailer" in its title
+      const trailerMatch = videoRenderers.find(v =>
+        v.titleText.toLowerCase().includes('trailer')
+      );
+      if (trailerMatch) {
+        logger.info('TrailerService', `Search matched trailer: "${trailerMatch.titleText}" → ${trailerMatch.videoId}`);
+        return trailerMatch.videoId;
+      }
+
+      // Fallback: first result
+      const first = videoRenderers[0];
+      logger.info('TrailerService', `Search fallback to first result: "${first.titleText}" → ${first.videoId}`);
+      return first.videoId;
+    } catch (err) {
+      logger.warn('TrailerService', 'parseSearchResultVideoId failed:', err);
       return null;
     }
   }
@@ -265,26 +301,6 @@ export class TrailerService {
     if (this.urlCache.size > 100) {
       const oldest = this.urlCache.keys().next().value;
       if (oldest) this.urlCache.delete(oldest);
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Private — URL validation
-  // ---------------------------------------------------------------------------
-
-  private static isValidTrailerUrl(url: string): boolean {
-    try {
-      const u = new URL(url);
-      if (!['http:', 'https:'].includes(u.protocol)) return false;
-      const host = u.hostname.toLowerCase();
-      return (
-        ['theplatform.com', 'youtube.com', 'youtu.be', 'vimeo.com',
-          'dailymotion.com', 'twitch.tv', 'amazonaws.com',
-          'cloudfront.net', 'googlevideo.com'].some(d => host.includes(d)) ||
-        /\.(mp4|m3u8|mpd|webm|mov)(\?|$)/i.test(u.pathname)
-      );
-    } catch {
-      return false;
     }
   }
 }
