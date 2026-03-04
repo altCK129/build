@@ -1,4 +1,5 @@
 import { logger } from '../utils/logger';
+import * as FileSystem from 'expo-file-system';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -70,7 +71,10 @@ export interface YouTubeExtractionResult {
 
 // Innertube client configs — we use Android (no cipher, direct URLs)
 // and web as fallback (may need cipher decode)
-// Note: ?key= param was deprecated by YouTube in mid-2023 and is no longer sent.
+// App clients (Android/iOS) authenticate via User-Agent + X-YouTube-Client-Name headers.
+// Web-based clients (WEB_EMBEDDED, TVHTML5) still benefit from the web API key.
+// This is YouTube's own public web client key — not a personal API key.
+const INNERTUBE_WEB_API_KEY = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
 const INNERTUBE_URL = 'https://www.youtube.com/youtubei/v1/player';
 
 // Android client gives direct URLs without cipher obfuscation
@@ -280,7 +284,6 @@ async function writeDashManifestToFile(
   durationSeconds?: number
 ): Promise<string | null> {
   try {
-    const FileSystem = await import('expo-file-system/legacy');
     const cacheDir = FileSystem.cacheDirectory;
     if (!cacheDir) return null;
 
@@ -360,7 +363,8 @@ async function fetchPlayerResponse(
   videoId: string,
   context: object,
   userAgent: string,
-  clientNameId: string = '3'
+  clientNameId: string = '3',
+  requiresWebKey: boolean = false
 ): Promise<InnertubePlayerResponse | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -373,8 +377,12 @@ async function fetchPlayerResponse(
       racyCheckOk: true,
     };
 
+    const url = requiresWebKey
+      ? `${INNERTUBE_URL}?key=${INNERTUBE_WEB_API_KEY}&prettyPrint=false`
+      : `${INNERTUBE_URL}?prettyPrint=false`;
+
     const response = await fetch(
-      `${INNERTUBE_URL}?prettyPrint=false`,
+      url,
       {
         method: 'POST',
         headers: {
@@ -501,7 +509,7 @@ export class YouTubeExtractor {
 
     logger.info('YouTubeExtractor', `Extracting for videoId=${videoId} platform=${platform ?? 'unknown'}`);
 
-    const clients: Array<{ context: object; userAgent: string; name: string; clientNameId: string }> = [
+    const clients: Array<{ context: object; userAgent: string; name: string; clientNameId: string; requiresWebKey?: boolean }> = [
       {
         name: 'ANDROID',
         clientNameId: '3',
@@ -517,12 +525,14 @@ export class YouTubeExtractor {
       {
         name: 'TVHTML5_EMBEDDED',
         clientNameId: '85',
+        requiresWebKey: true,
         context: TVHTML5_EMBEDDED_CONTEXT,
         userAgent: 'Mozilla/5.0 (SMART-TV; Linux; Tizen 6.0)',
       },
       {
         name: 'WEB_EMBEDDED',
         clientNameId: '56',
+        requiresWebKey: true,
         context: WEB_EMBEDDED_CONTEXT,
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
       },
@@ -534,7 +544,7 @@ export class YouTubeExtractor {
 
     for (const client of clients) {
       logger.info('YouTubeExtractor', `Trying ${client.name} client...`);
-      const resp = await fetchPlayerResponse(videoId, client.context, client.userAgent, client.clientNameId);
+      const resp = await fetchPlayerResponse(videoId, client.context, client.userAgent, client.clientNameId, client.requiresWebKey);
       if (!resp) continue;
 
       const status = resp.playabilityStatus?.status;
