@@ -1612,29 +1612,13 @@ const HeroSection: React.FC<HeroSectionProps> = memo(({
           </Animated.View>
         )}
 
-        {/* Hidden preload trailer player - loads in background */}
-        {shouldLoadSecondaryData && settings?.showTrailers && trailerUrl && !trailerLoading && !trailerError && !trailerPreloaded && (
-          <View style={[staticStyles.absoluteFill, { opacity: 0, pointerEvents: 'none' }]}>
-            <TrailerPlayer
-              key={`preload-${trailerUrl}`}
-              trailerUrl={trailerUrl}
-              autoPlay={false}
-              muted={true}
-              style={staticStyles.absoluteFill}
-              hideLoadingSpinner={true}
-              onLoad={handleTrailerPreloaded}
-              onError={handleTrailerError}
-            />
-          </View>
-        )}
-
-        {/* Visible trailer player - rendered on top with fade transition and parallax */}
-        {shouldLoadSecondaryData && settings?.showTrailers && trailerUrl && !trailerLoading && !trailerError && trailerPreloaded && (
+        {/* Single trailer player - starts hidden (opacity 0), fades in when ready */}
+        {shouldLoadSecondaryData && settings?.showTrailers && trailerUrl && !trailerLoading && !trailerError && (
           <Animated.View style={[staticStyles.absoluteFill, {
             opacity: trailerOpacity
           }, trailerParallaxStyle]}>
             <TrailerPlayer
-              key={`visible-${trailerUrl}`}
+              key={`trailer-${trailerUrl}`}
               ref={trailerVideoRef}
               trailerUrl={trailerUrl}
               autoPlay={globalTrailerPlaying}
