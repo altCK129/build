@@ -13,7 +13,6 @@ import { mmkvStorage } from '../services/mmkvStorage';
 import { Stream } from '../types/metadata';
 import { storageService } from '../services/storageService';
 import { useSettings } from './useSettings';
-import { MalSync } from '../services/mal/MalSync';
 
 // Constants for timeouts and retries
 const API_TIMEOUT = 10000; // 10 seconds
