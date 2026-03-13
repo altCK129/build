@@ -1498,10 +1498,8 @@ class CatalogService {
         return;
       }
 
-      // Global dedupe across emitted results — keyed by ID only so that a
-      // specific type (e.g. "anime.series") can displace a generic one ("series")
-      // for the same content ID when a more-specific addon result arrives.
-      const globalSeenById = new Map<string, string>(); // id -> type already emitted
+      // Global dedupe across emitted results
+      const globalSeen = new Set<string>();
 
       await Promise.all(
         searchableAddons.map(async (addon) => {
@@ -1538,28 +1536,29 @@ class CatalogService {
               return;
             }
 
-            // Dedupe within addon results first
-            const localSeen = new Set<string>();
-            const deduped = addonResults.filter(item => {
-              if (localSeen.has(item.id)) return false;
-              localSeen.add(item.id);
-              return true;
-            });
+            // Within this addon's results, if the same ID appears under both a generic
+            // type (e.g. "series") and a specific type (e.g. "anime.series"), keep only
+            // the specific one. This handles addons that expose both catalog types.
+            const bestByIdWithinAddon = new Map<string, StreamingContent>();
+            for (const item of addonResults) {
+              const existing = bestByIdWithinAddon.get(item.id);
+              if (!existing) {
+                bestByIdWithinAddon.set(item.id, item);
+              } else if (!existing.type.includes('.') && item.type.includes('.')) {
+                // Prefer the more specific type
+                bestByIdWithinAddon.set(item.id, item);
+              }
+            }
+            const deduped = Array.from(bestByIdWithinAddon.values());
 
-            // Against global: prefer specific types (containing ".") over generic ones.
-            // If a more specific type for this ID arrives, it replaces the generic entry.
+            // Dedupe against global seen (keyed by type:id to avoid cross-addon ID collisions)
+            const localSeen = new Set<string>();
             const unique = deduped.filter(item => {
-              const existingType = globalSeenById.get(item.id);
-              if (!existingType) {
-                globalSeenById.set(item.id, item.type);
-                return true;
-              }
-              // Replace generic type with specific type (e.g. "series" -> "anime.series")
-              if (!existingType.includes('.') && item.type.includes('.')) {
-                globalSeenById.set(item.id, item.type);
-                return true;
-              }
-              return false;
+              const key = `${item.type}:${item.id}`;
+              if (localSeen.has(key) || globalSeen.has(key)) return false;
+              localSeen.add(key);
+              globalSeen.add(key);
+              return true;
             });
 
             if (unique.length > 0 && !controller.cancelled) {
