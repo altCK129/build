@@ -13,6 +13,7 @@ import { mmkvStorage } from '../services/mmkvStorage';
 import { Stream } from '../types/metadata';
 import { storageService } from '../services/storageService';
 import { useSettings } from './useSettings';
+import { MalSync } from '../services/mal/MalSync';
 
 // Constants for timeouts and retries
 const API_TIMEOUT = 10000; // 10 seconds
@@ -119,6 +120,7 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
   const normalizedType = type === 'anime.series' ? 'series'
     : type === 'anime.movie' ? 'movie'
     : type;
+
   const [metadata, setMetadata] = useState<StreamingContent | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -2034,12 +2036,17 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
           // Remove 'series:' prefix if present to be safe, though parsing logic above usually handles it
           stremioEpisodeId = episodeId.replace(/^series:/, '');
         } else if (!seasonNum) {
-          // No season (e.g., mal:57658:1) - use id:episode format
-          stremioEpisodeId = `${id}:${episodeNum}`;
+          // No season (e.g., kitsu:12345:1, mal:57658:1) - use showIdStr:episode format.
+          // Use showIdStr (parsed from episodeId) rather than outer `id` so that when the
+          // show has multiple IDs (e.g. tvdb+kitsu), we preserve the namespace that the
+          // episode actually belongs to (e.g. kitsu:animeId:epNum, not tvdb:showId:epNum).
+          const baseId = showIdStr && showIdStr !== id ? showIdStr : id;
+          stremioEpisodeId = `${baseId}:${episodeNum}`;
         } else {
-          stremioEpisodeId = `${id}:${seasonNum}:${episodeNum}`;
+          const baseId = showIdStr && showIdStr !== id ? showIdStr : id;
+          stremioEpisodeId = `${baseId}:${seasonNum}:${episodeNum}`;
         }
-        if (__DEV__) console.log('ℹ️ [loadEpisodeStreams] Using ID as both TMDB and Stremio ID:', tmdbId);
+        if (__DEV__) console.log('ℹ️ [loadEpisodeStreams] Using ID as both TMDB and Stremio ID:', tmdbId, '| stremioEpisodeId:', stremioEpisodeId);
       }
 
       // Extract episode info from the episodeId for logging
