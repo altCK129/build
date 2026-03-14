@@ -53,6 +53,7 @@ export interface AddonSearchResults {
   addonId: string;
   addonName: string;
   sectionName: string; // Display name — catalog name for named catalogs, addon name otherwise
+  catalogIndex: number; // Position in addon manifest — used for deterministic sort within same addon
   results: StreamingContent[];
 }
 
@@ -1531,6 +1532,10 @@ class CatalogService {
         return;
       }
 
+      // Build addon order map for deterministic section sorting
+      const addonOrderRef: Record<string, number> = {};
+      searchableAddons.forEach((addon, i) => { addonOrderRef[addon.id] = i; });
+
       // Global dedupe across emitted results
       const globalSeen = new Set<string>();
 
@@ -1573,8 +1578,20 @@ class CatalogService {
             }
 
             if (hasMultipleCatalogs) {
-              // Emit each catalog as its own section
-              for (const { catalog, results } of catalogResultsList) {
+              // Human-readable labels for known content types used as fallback section names
+              const CATALOG_TYPE_LABELS: Record<string, string> = {
+                'movie': 'Movies',
+                'series': 'TV Shows',
+                'anime.series': 'Anime Series',
+                'anime.movie': 'Anime Movies',
+                'other': 'Other',
+                'tv': 'TV',
+                'channel': 'Channels',
+              };
+
+              // Emit each catalog as its own section, in manifest order
+              for (let ci = 0; ci < catalogResultsList.length; ci++) {
+                const { catalog, results } = catalogResultsList[ci];
                 if (controller.cancelled) return;
 
                 // Within-catalog dedup: prefer dot-type over generic for same ID
@@ -1603,11 +1620,23 @@ class CatalogService {
                 });
 
                 if (unique.length > 0 && !controller.cancelled) {
-                  const sectionName = catalog.name && catalog.name !== addon.name
-                    ? `${addon.name} - ${catalog.name}`
-                    : addon.name;
-                  logger.log(`Emitting ${unique.length} results from ${addon.name} / ${catalog.name}`);
-                  onAddonResults({ addonId: `${addon.id}||${catalog.id}`, addonName: addon.name, sectionName, results: unique });
+                  // Build section name:
+                  // - If catalog.name is generic ("Search") or same as addon name, use type label instead
+                  // - Otherwise use catalog.name as-is
+                  const GENERIC_NAMES = new Set(['search', 'Search']);
+                  const typeLabel = CATALOG_TYPE_LABELS[catalog.type]
+                    || catalog.type.replace(/[._]/g, ' ').replace(/\w/g, (c: string) => c.toUpperCase());
+                  const catalogLabel = (!catalog.name || GENERIC_NAMES.has(catalog.name) || catalog.name === addon.name)
+                    ? typeLabel
+                    : catalog.name;
+                  const sectionName = `${addon.name} - ${catalogLabel}`;
+
+                  // catalogIndex encodes addon rank + position within addon for deterministic ordering
+                  const addonRank = addonOrderRef[addon.id] ?? Number.MAX_SAFE_INTEGER;
+                  const catalogIndex = addonRank * 1000 + ci;
+
+                  logger.log(`Emitting ${unique.length} results from ${sectionName}`);
+                  onAddonResults({ addonId: `${addon.id}||${catalog.id}`, addonName: addon.name, sectionName, catalogIndex, results: unique });
                 }
               }
             } else {
@@ -1633,8 +1662,9 @@ class CatalogService {
               });
 
               if (unique.length > 0 && !controller.cancelled) {
+                const addonRank = addonOrderRef[addon.id] ?? Number.MAX_SAFE_INTEGER;
                 logger.log(`Emitting ${unique.length} results from ${addon.name}`);
-                onAddonResults({ addonId: addon.id, addonName: addon.name, sectionName: addon.name, results: unique });
+                onAddonResults({ addonId: addon.id, addonName: addon.name, sectionName: addon.name, catalogIndex: addonRank * 1000, results: unique });
               }
             }
           } catch (e) {
