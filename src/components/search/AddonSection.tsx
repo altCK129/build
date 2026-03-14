@@ -68,7 +68,7 @@ export const AddonSection = React.memo(({
             {/* Addon Header */}
             <View style={styles.addonHeaderContainer}>
                 <Text style={[styles.addonHeaderText, { color: currentTheme.colors.white }]}>
-                    {addonGroup.addonName}
+                    {(addonGroup as any).sectionName || addonGroup.addonName}
                 </Text>
                 <View style={[styles.addonHeaderBadge, { backgroundColor: currentTheme.colors.elevation2 }]}>
                     <Text style={[styles.addonHeaderBadgeText, { color: currentTheme.colors.lightGray }]}>
