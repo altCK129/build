@@ -254,12 +254,12 @@ const HomeScreen = () => {
               continue;
             }
 
-            // 2. Never show catalogs with required extras other than "genre"
-            //    (e.g. calendarVideosIds — these require special params to load)
+            // 2. Never show catalogs that have any required extra
+            //    (e.g. required genre, calendarVideosIds — these need params to load)
             const requiredExtras = (catalog.extra || [])
               .filter((e: any) => e.isRequired)
               .map((e: any) => e.name);
-            if (requiredExtras.some((e: string) => e !== 'genre')) {
+            if (requiredExtras.length > 0) {
               continue;
             }
 
