@@ -244,7 +244,34 @@ const HomeScreen = () => {
       for (const addon of addons) {
         if (addon.catalogs) {
           for (const catalog of addon.catalogs) {
-            // Check if this catalog is enabled (default to true if no setting exists)
+            // ── Manifest-level hard gates (cannot be overridden by user settings) ──
+
+            // 1. Never show search catalogs (search.movie, search.series, etc.)
+            if (
+              (catalog.id && catalog.id.startsWith('search.')) ||
+              (catalog.type && catalog.type.startsWith('search'))
+            ) {
+              continue;
+            }
+
+            // 2. Never show catalogs with required extras other than "genre"
+            //    (e.g. calendarVideosIds — these require special params to load)
+            const requiredExtras = (catalog.extra || [])
+              .filter((e: any) => e.isRequired)
+              .map((e: any) => e.name);
+            if (requiredExtras.some((e: string) => e !== 'genre')) {
+              continue;
+            }
+
+            // 3. Respect showInHome flag — if the addon uses it on any catalog,
+            //    only catalogs with showInHome:true are eligible for home.
+            const addonUsesShowInHome = addon.catalogs.some((c: any) => c.showInHome === true);
+            if (addonUsesShowInHome && !(catalog as any).showInHome) {
+              continue;
+            }
+
+            // ── User toggle (mmkv) — applied on top of manifest gates ──
+            // Default is true unless the manifest gates above have already filtered it out.
             const settingKey = `${addon.id}:${catalog.type}:${catalog.id}`;
             const isEnabled = catalogSettings[settingKey] ?? true;
 
