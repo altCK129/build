@@ -515,7 +515,12 @@ const SearchScreen = () => {
 
         setResults(prev => {
           if (!isMounted.current) return prev;
-          const getRank = (id: string) => addonOrderRankRef.current[id] ?? Number.MAX_SAFE_INTEGER;
+          // For catalog-level sections (id = "addonId||catalogId"), rank by the base addon id
+          const getRank = (id: string) => {
+            if (addonOrderRankRef.current[id] !== undefined) return addonOrderRankRef.current[id];
+            const baseAddonId = id.includes('||') ? id.split('||')[0] : id;
+            return (addonOrderRankRef.current[baseAddonId] ?? Number.MAX_SAFE_INTEGER - 1) + 0.5;
+          };
           const existingIndex = prev.byAddon.findIndex(s => s.addonId === section.addonId);
 
           if (existingIndex >= 0) {
