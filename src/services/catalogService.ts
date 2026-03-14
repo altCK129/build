@@ -363,8 +363,6 @@ class CatalogService {
   }
 
   private canBrowseCatalog(catalog: StreamingCatalog): boolean {
-    // Exclude non-standard types like anime.series, anime.movie from discover browsing
-    if (catalog.type && catalog.type.includes('.')) return false;
     // Exclude search-only catalogs (e.g. search.movie, search.series) from home & discover
     if (
       (catalog.id && catalog.id.startsWith('search.')) ||
