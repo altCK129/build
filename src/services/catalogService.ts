@@ -52,6 +52,7 @@ export interface StreamingAddon {
 export interface AddonSearchResults {
   addonId: string;
   addonName: string;
+  sectionName: string; // Display name — catalog name for named catalogs, addon name otherwise
   results: StreamingContent[];
 }
 
@@ -1537,7 +1538,6 @@ class CatalogService {
         searchableAddons.map(async (addon) => {
           if (controller.cancelled) return;
           try {
-            // Get the manifest to ensure we have the correct URL
             const manifest = manifestMap.get(addon.id);
             if (!manifest) {
               logger.warn(`Manifest not found for addon ${addon.name} (${addon.id})`);
@@ -1545,7 +1545,6 @@ class CatalogService {
             }
 
             const searchableCatalogs = (addon.catalogs || []).filter(catalog => this.canSearchCatalog(catalog));
-
             logger.log(`Searching ${addon.name} (${addon.id}) with ${searchableCatalogs.length} searchable catalogs`);
 
             // Fetch all catalogs for this addon in parallel
@@ -1554,48 +1553,89 @@ class CatalogService {
             );
             if (controller.cancelled) return;
 
-            const addonResults: StreamingContent[] = [];
-            for (const s of settled) {
-              if (s.status === 'fulfilled' && Array.isArray(s.value)) {
-                addonResults.push(...s.value);
+            // If addon has multiple search catalogs, emit each as its own section.
+            // If only one, emit as a single addon section (original behaviour).
+            const hasMultipleCatalogs = searchableCatalogs.length > 1;
+
+            const catalogResultsList: { catalog: any; results: StreamingContent[] }[] = [];
+            for (let i = 0; i < searchableCatalogs.length; i++) {
+              const s = settled[i];
+              if (s.status === 'fulfilled' && Array.isArray(s.value) && s.value.length > 0) {
+                catalogResultsList.push({ catalog: searchableCatalogs[i], results: s.value });
               } else if (s.status === 'rejected') {
-                logger.warn(`Search failed for catalog in ${addon.name}:`, s.reason);
+                logger.warn(`Search failed for catalog ${searchableCatalogs[i].id} in ${addon.name}:`, s.reason);
               }
             }
 
-            if (addonResults.length === 0) {
+            if (catalogResultsList.length === 0) {
               logger.log(`No results from ${addon.name}`);
               return;
             }
 
-            // Within this addon's results, if the same ID appears under both a generic
-            // type (e.g. "series") and a specific type (e.g. "anime.series"), keep only
-            // the specific one. This handles addons that expose both catalog types.
-            const bestByIdWithinAddon = new Map<string, StreamingContent>();
-            for (const item of addonResults) {
-              const existing = bestByIdWithinAddon.get(item.id);
-              if (!existing) {
-                bestByIdWithinAddon.set(item.id, item);
-              } else if (!existing.type.includes('.') && item.type.includes('.')) {
-                // Prefer the more specific type
-                bestByIdWithinAddon.set(item.id, item);
+            if (hasMultipleCatalogs) {
+              // Emit each catalog as its own section
+              for (const { catalog, results } of catalogResultsList) {
+                if (controller.cancelled) return;
+
+                // Within-catalog dedup: prefer dot-type over generic for same ID
+                const bestById = new Map<string, StreamingContent>();
+                for (const item of results) {
+                  const existing = bestById.get(item.id);
+                  if (!existing || (!existing.type.includes('.') && item.type.includes('.'))) {
+                    bestById.set(item.id, item);
+                  }
+                }
+
+                // Stamp catalog type onto results
+                const stamped = Array.from(bestById.values()).map(item => {
+                  if (catalog.type && item.type !== catalog.type) {
+                    return { ...item, type: catalog.type };
+                  }
+                  return item;
+                });
+
+                // Dedupe against global seen
+                const unique = stamped.filter(item => {
+                  const key = `${item.type}:${item.id}`;
+                  if (globalSeen.has(key)) return false;
+                  globalSeen.add(key);
+                  return true;
+                });
+
+                if (unique.length > 0 && !controller.cancelled) {
+                  const sectionName = catalog.name && catalog.name !== addon.name
+                    ? `${addon.name} - ${catalog.name}`
+                    : addon.name;
+                  logger.log(`Emitting ${unique.length} results from ${addon.name} / ${catalog.name}`);
+                  onAddonResults({ addonId: `${addon.id}||${catalog.id}`, addonName: addon.name, sectionName, results: unique });
+                }
               }
-            }
-            const deduped = Array.from(bestByIdWithinAddon.values());
+            } else {
+              // Single catalog — one section per addon
+              const allResults = catalogResultsList.flatMap(c => c.results);
 
-            // Dedupe against global seen (keyed by type:id to avoid cross-addon ID collisions)
-            const localSeen = new Set<string>();
-            const unique = deduped.filter(item => {
-              const key = `${item.type}:${item.id}`;
-              if (localSeen.has(key) || globalSeen.has(key)) return false;
-              localSeen.add(key);
-              globalSeen.add(key);
-              return true;
-            });
+              const bestByIdWithinAddon = new Map<string, StreamingContent>();
+              for (const item of allResults) {
+                const existing = bestByIdWithinAddon.get(item.id);
+                if (!existing || (!existing.type.includes('.') && item.type.includes('.'))) {
+                  bestByIdWithinAddon.set(item.id, item);
+                }
+              }
+              const deduped = Array.from(bestByIdWithinAddon.values());
 
-            if (unique.length > 0 && !controller.cancelled) {
-              logger.log(`Emitting ${unique.length} results from ${addon.name}`);
-              onAddonResults({ addonId: addon.id, addonName: addon.name, results: unique });
+              const localSeen = new Set<string>();
+              const unique = deduped.filter(item => {
+                const key = `${item.type}:${item.id}`;
+                if (localSeen.has(key) || globalSeen.has(key)) return false;
+                localSeen.add(key);
+                globalSeen.add(key);
+                return true;
+              });
+
+              if (unique.length > 0 && !controller.cancelled) {
+                logger.log(`Emitting ${unique.length} results from ${addon.name}`);
+                onAddonResults({ addonId: addon.id, addonName: addon.name, sectionName: addon.name, results: unique });
+              }
             }
           } catch (e) {
             logger.error(`Error searching addon ${addon.name} (${addon.id}):`, e);
