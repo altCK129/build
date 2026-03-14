@@ -365,8 +365,35 @@ class CatalogService {
   private canBrowseCatalog(catalog: StreamingCatalog): boolean {
     // Exclude non-standard types like anime.series, anime.movie from discover browsing
     if (catalog.type && catalog.type.includes('.')) return false;
+    // Exclude search-only catalogs (e.g. search.movie, search.series) from home & discover
+    if (
+      (catalog.id && catalog.id.startsWith('search.')) ||
+      (catalog.type && catalog.type.startsWith('search'))
+    ) {
+      return false;
+    }
     const requiredExtras = this.getRequiredCatalogExtras(catalog);
     return requiredExtras.every(extraName => extraName === 'genre');
+  }
+
+  /**
+   * Returns true if a catalog should be disabled by default on the home screen.
+   * Search catalogs and special catalogs with required extras (e.g. calendarVideosIds) are off by default.
+   */
+  private shouldDefaultDisableCatalog(catalog: StreamingCatalog): boolean {
+    // Search catalogs
+    if (
+      (catalog.id && catalog.id.startsWith('search.')) ||
+      (catalog.type && catalog.type.startsWith('search'))
+    ) {
+      return true;
+    }
+    // Catalogs with required extras other than "genre" (e.g. calendarVideosIds)
+    const requiredExtras = this.getRequiredCatalogExtras(catalog);
+    if (requiredExtras.some(extra => extra !== 'genre')) {
+      return true;
+    }
+    return false;
   }
 
   private canSearchCatalog(catalog: StreamingCatalog): boolean {
@@ -396,7 +423,24 @@ class CatalogService {
           }
 
           const settingKey = `${addon.id}:${catalog.type}:${catalog.id}`;
-          const isEnabled = catalogSettings[settingKey] ?? true;
+
+          // showInHome handling: if the addon uses the showInHome flag on any catalog,
+          // only catalogs explicitly marked showInHome:true are eligible for home.
+          // Catalogs with showInHome:false are hard-excluded from home (still in Discover).
+          const addonHasShowInHomeFlag = (addon.catalogs || []).some((c: any) => c.showInHome === true);
+          const catalogShowInHome = (catalog as any).showInHome === true;
+          if (addonHasShowInHomeFlag && !catalogShowInHome) {
+            continue;
+          }
+
+          // Default enabled state:
+          // - showInHome:true catalogs → on by default
+          // - No showInHome flag on addon → search/calendar off, everything else on
+          const defaultEnabled = addonHasShowInHomeFlag
+            ? true
+            : !this.shouldDefaultDisableCatalog(catalog);
+
+          const isEnabled = catalogSettings[settingKey] ?? defaultEnabled;
 
           if (isEnabled) {
             potentialCatalogs.push({ addon, catalog });
