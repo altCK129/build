@@ -1924,13 +1924,16 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
 
         const cleanEpisodeId = episodeId.replace(/^series:/, '');
         const parts = cleanEpisodeId.split(':');
+        // Check the episode ID's own namespace, not the show-level id.
+        // e.g. show id may be "tt12343534" but episodeId may be "kitsu:48363:8"
+        const episodeIsImdb = parts[0].startsWith('tt');
 
-        if (isImdb && parts.length === 3) {
+        if (episodeIsImdb && parts.length === 3) {
           // Format: ttXXX:season:episode
           showIdStr = parts[0];
           seasonNum = parts[1];
           episodeNum = parts[2];
-        } else if (!isImdb && parts.length === 3) {
+        } else if (!episodeIsImdb && parts.length === 3) {
           // Format: prefix:id:episode (no season for MAL/Kitsu/etc)
           showIdStr = `${parts[0]}:${parts[1]}`;
           episodeNum = parts[2];
@@ -2016,16 +2019,18 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
         }
         if (__DEV__) console.log('✅ [loadEpisodeStreams] Converted to TMDB ID:', tmdbId);
 
-        // Ensure consistent format
-        // Ensure consistent format or fallback to episodeId if parsing failed
-        // This handles cases where 'tt' is used for a unique episode ID directly
+        // Ensure consistent format or fallback to episodeId if parsing failed.
+        // If the episode's namespace differs from the show's tt id (e.g. kitsu:48363:8
+        // on a tt-identified show), use showIdStr so we request via the correct namespace.
         if (!seasonNum && !episodeNum) {
           stremioEpisodeId = episodeId;
         } else if (!seasonNum) {
-          // No season (e.g., mal:57658:1) - use id:episode format
-          stremioEpisodeId = `${id}:${episodeNum}`;
+          // No season (e.g., kitsu:48363:8, mal:57658:1)
+          const baseId = showIdStr && showIdStr !== id ? showIdStr : id;
+          stremioEpisodeId = `${baseId}:${episodeNum}`;
         } else {
-          stremioEpisodeId = `${id}:${seasonNum}:${episodeNum}`;
+          const baseId = showIdStr && showIdStr !== id ? showIdStr : id;
+          stremioEpisodeId = `${baseId}:${seasonNum}:${episodeNum}`;
         }
         if (__DEV__) console.log('🔧 [loadEpisodeStreams] Normalized episode ID for addons:', stremioEpisodeId);
       } else {
